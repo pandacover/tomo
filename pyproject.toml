@@ -1,0 +1,31 @@
+[project]
+name = "butler"
+version = "0.1.0"
+description = "A primitive-tools Deep Agents chat interface backed by SuperGrok OAuth."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "deepagents>=0.6.7",
+    "httpx>=0.28.0",
+    "langchain>=1.0.0",
+    "langchain-xai>=1.0.0",
+    "prompt-toolkit>=3.0.52",
+    "pydantic-settings>=2.0.0",
+    "rank-bm25>=0.2.2",
+]
+
+[project.scripts]
+butler = "butler.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.9.0,<0.10.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "butler"
+module-root = "src"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+]

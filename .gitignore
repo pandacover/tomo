@@ -1,0 +1,7 @@
+.butler/
+sessions/
+.env
+.venv/
+__pycache__/
+*.py[cod]
+.python-version
