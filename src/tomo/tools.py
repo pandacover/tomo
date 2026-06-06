@@ -18,7 +18,6 @@ from langchain_core.tools import tool
 from rank_bm25 import BM25Okapi
 
 
-MAX_READ_BYTES = 200_000
 MAX_BASH_OUTPUT = 20_000
 BASH_TIMEOUT_SECONDS = 60
 WEB_TIMEOUT_SECONDS = 10
@@ -27,7 +26,7 @@ MAX_WEB_FETCH_OUTPUT = 12_000
 WEB_SEARCH_CHUNK_SIZE = 1_500
 WEB_SEARCH_MAX_CHUNKS = 8
 DUCKDUCKGO_HTML_URL = "https://html.duckduckgo.com/html/"
-WEB_USER_AGENT = "Butler/0.1 (+https://example.invalid/butler)"
+WEB_USER_AGENT = "Tomo/0.1 (+https://example.invalid/tomo)"
 
 
 class ApprovalRequired(RuntimeError):
@@ -51,58 +50,15 @@ def set_approval_handler(handler: ApprovalHandler | None) -> None:
 
 
 def get_tools():
-    return [read, write, edit, search, bash, web_search, web_fetch, append_memory, read_memory]
+    return [files_search, terminal, web_search, web_fetch, append_memory, read_memory]
 
 
-@tool("read")
-def read(path: str) -> str:
-    """Read a UTF-8 text file inside the current working directory."""
-    target = _resolve_path(path)
-    if target.is_dir():
-        return f"Error: {path} is a directory."
-    if not target.exists():
-        return f"Error: {path} does not exist."
-    size = target.stat().st_size
-    if size > MAX_READ_BYTES:
-        return f"Error: {path} is too large to read ({size} bytes, limit {MAX_READ_BYTES})."
-    return target.read_text(encoding="utf-8")
-
-
-@tool("write")
-def write(path: str, content: str) -> str:
-    """Create or overwrite a UTF-8 text file inside the current working directory."""
-    target = _resolve_path(path)
-    if target.exists() and target.is_dir():
-        return f"Error: {path} is a directory."
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(content, encoding="utf-8")
-    return f"Wrote {len(content)} characters to {path}."
-
-
-@tool("edit")
-def edit(path: str, old: str, new: str) -> str:
-    """Replace one exact text occurrence in a file inside the current working directory."""
-    target = _resolve_path(path)
-    if target.is_dir():
-        return f"Error: {path} is a directory."
-    if not target.exists():
-        return f"Error: {path} does not exist."
-    content = target.read_text(encoding="utf-8")
-    count = content.count(old)
-    if count == 0:
-        return "Error: old text was not found."
-    if count > 1:
-        return f"Error: old text appears {count} times; edit is ambiguous."
-    target.write_text(content.replace(old, new, 1), encoding="utf-8")
-    return f"Edited {path}."
-
-
-@tool("bash")
-def bash(command: str) -> str:
-    """Run a bash command from the current working directory."""
+@tool("terminal")
+def terminal(command: str) -> str:
+    """Run a non-interactive bash command in the workspace. Use for tests, project CLIs, git/status checks, package commands, file metadata, and exact command output."""
     blocked = _blocked_bash_reason(command)
     if blocked:
-        return f"Error: blocked bash command: {blocked}"
+        return f"Error: blocked terminal command: {blocked}"
     try:
         result = subprocess.run(
             command,
@@ -127,9 +83,9 @@ def bash(command: str) -> str:
     return f"Exit code: {result.returncode}\n{output}" if output else f"Exit code: {result.returncode}"
 
 
-@tool("search")
-def search(query: str, path: str = ".", k: int = 20) -> str:
-    """Search text files using ripgrep, then BM25-rank matching lines."""
+@tool("files_search")
+def files_search(query: str, path: str = ".", k: int = 20) -> str:
+    """Search local workspace text with ripgrep and BM25-rank matching lines. Use to find code, symbols, config, tests, docs, and references before reading files."""
     if not query or not query.strip():
         return "Error: search query cannot be empty."
     target = _resolve_path(path)
@@ -137,17 +93,32 @@ def search(query: str, path: str = ".", k: int = 20) -> str:
     if reason:
         return f"Error: search path {path} {reason}"
     command = f"rg --line-number --no-heading --smart-case {shlex.quote(query)} {shlex.quote(str(target))}"
-    result = bash.invoke({"command": command})
-    if not result.startswith("Exit code: 0"):
+    try:
+        result = subprocess.run(
+            command,
+            cwd=_workspace(),
+            shell=True,
+            executable="/bin/bash",
+            text=True,
+            capture_output=True,
+            timeout=BASH_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        return f"Error: search timed out after {BASH_TIMEOUT_SECONDS}s."
+    output = "\n".join(part for part in (result.stdout.strip(), result.stderr.strip()) if part)
+    if result.returncode == 1:
         return "No matches found."
-    lines = result.splitlines()[1:]
+    if result.returncode != 0:
+        detail = output[:MAX_BASH_OUTPUT] if output else "ripgrep failed without output."
+        return f"Error: rg exited with code {result.returncode}\n{detail}"
+    lines = result.stdout.splitlines()
     ranked = rank_texts(query, lines, k=k)
     return "\n".join(ranked) if ranked else "No matches found."
 
 
 @tool("web_search")
 def web_search(query: str, k: int = 5, fetch_results: bool = True) -> str:
-    """Search the public web with DuckDuckGo HTML and optionally fetch/rank result text."""
+    """Search the public web for current or external information. Use for news, versions, docs, prices, schedules, laws, and facts that may have changed."""
     if not query or not query.strip():
         return "Error: web search query cannot be empty."
     k = max(1, min(k, 10))
@@ -183,7 +154,7 @@ def web_search(query: str, k: int = 5, fetch_results: bool = True) -> str:
 
 @tool("web_fetch")
 def web_fetch(url: str, query: str | None = None) -> str:
-    """Fetch a public HTTP(S) URL and return cleaned text, optionally BM25-ranked by query."""
+    """Fetch and clean text from a known public HTTP(S) URL. Use when a specific page, article, documentation URL, or source needs to be read."""
     fetch = fetch_url_text(url)
     if fetch.error:
         return f"Error: {fetch.error}"
@@ -540,7 +511,7 @@ def _now_iso() -> str:
 
 @tool("append_memory")
 def append_memory(text: str) -> str:
-    """Append a timestamped memory/observation to MEMORY.md. Always use this for important facts, observations, or learnings."""
+    """Append a timestamped durable memory to MEMORY.md. Use for user preferences, project facts, decisions, recurring context, and useful workarounds."""
     if not text or not text.strip():
         return "Error: memory text cannot be empty"
     line = f"[{_now_iso()}] {text.strip()}\n"
@@ -552,7 +523,7 @@ def append_memory(text: str) -> str:
 
 @tool("read_memory")
 def read_memory(query: str, k: int = 8) -> str:
-    """Search MEMORY.md using BM25 and return the top-k most relevant entries sorted by time (newest first)."""
+    """Search MEMORY.md with BM25 for relevant prior context. Use before answering when user preferences, past decisions, or project facts may matter."""
     if not MEMORY_FILE.exists():
         return "No memory file yet."
 

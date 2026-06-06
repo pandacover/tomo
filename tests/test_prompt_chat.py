@@ -6,9 +6,9 @@ from unittest.mock import Mock
 
 from prompt_toolkit.widgets import TextArea
 
-from butler.session_store import create_session
-from butler.tools import ApprovalRequest
-from butler.tui import PromptChat
+from tomo.session_store import create_session
+from tomo.tools import ApprovalRequest
+from tomo.tui import PromptChat
 
 
 class FakeApp:
@@ -102,6 +102,18 @@ def test_prompt_chat_processes_clear_command(tmp_path, monkeypatch):
     assert session.messages == []
 
 
+def test_prompt_chat_debug_tool_command_toggles_full_tool_output():
+    chat = make_chat()
+
+    assert chat.handle_command("/debug-tool enable") is True
+    assert chat.debug_tool is True
+    assert "Tool debug output enabled." in chat.output.text
+
+    assert chat.handle_command("/debug-tool disable") is True
+    assert chat.debug_tool is False
+    assert "Tool debug output disabled." in chat.output.text
+
+
 def test_prompt_chat_selects_saved_session_by_number(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     current = create_session("Current")
@@ -110,7 +122,7 @@ def test_prompt_chat_selects_saved_session_by_number(tmp_path, monkeypatch):
     newer = create_session("Newer")
     newer.messages.append({"role": "assistant", "content": "from newer"})
 
-    from butler.session_store import save_session
+    from tomo.session_store import save_session
 
     save_session(older)
     save_session(newer)
@@ -132,7 +144,7 @@ def test_prompt_chat_adds_dollar_skill_context(tmp_path, monkeypatch):
     skill_dir.mkdir(parents=True)
     skill_file = skill_dir / "SKILL.md"
     skill_file.write_text("---\nname: planner\n---\nUse planning.", encoding="utf-8")
-    monkeypatch.setattr("butler.tui.SKILL_SOURCES", [str(tmp_path / "skills")])
+    monkeypatch.setattr("tomo.tui.SKILL_SOURCES", [str(tmp_path / "skills")])
     chat = make_chat()
 
     content = chat.add_skill_context("Use $planner for this")
@@ -150,7 +162,7 @@ def test_prompt_chat_dollar_skill_uses_highest_precedence_source(tmp_path, monke
     high.mkdir(parents=True)
     (low / "SKILL.md").write_text("low", encoding="utf-8")
     (high / "SKILL.md").write_text("high", encoding="utf-8")
-    monkeypatch.setattr("butler.tui.SKILL_SOURCES", [str(tmp_path / "low"), str(tmp_path / "high")])
+    monkeypatch.setattr("tomo.tui.SKILL_SOURCES", [str(tmp_path / "low"), str(tmp_path / "high")])
     chat = make_chat()
 
     content = chat.add_skill_context("Use $planner")
@@ -163,7 +175,7 @@ def test_prompt_chat_sends_skill_context_without_storing_it(tmp_path, monkeypatc
     skill_dir = tmp_path / "skills" / "planner"
     skill_dir.mkdir(parents=True)
     (skill_dir / "SKILL.md").write_text("skill body", encoding="utf-8")
-    monkeypatch.setattr("butler.tui.SKILL_SOURCES", [str(tmp_path / "skills")])
+    monkeypatch.setattr("tomo.tui.SKILL_SOURCES", [str(tmp_path / "skills")])
     class InvokeOnlyAgent:
         def __init__(self) -> None:
             self.invoke = Mock(return_value={"messages": [{"role": "assistant", "content": "done"}]})

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+import re
 from typing import Callable, Protocol
 
 from langgraph.types import Command
@@ -23,22 +25,24 @@ class ApprovalResponder(Protocol):
 @dataclass(frozen=True)
 class ToolCallLifecycleEvent:
     name: str
-    status: str
+    input: object = None
 
-    def render(self) -> str:
-        return f"{self.name} tool {self.status}"
+    def render(self, *, full_input: bool = False) -> str:
+        return f'{self.name}: "{format_tool_input(self.input, limit=None if full_input else 50)}"'
 
 
 @dataclass(frozen=True)
 class AgentTrace:
     reasoning_summary: str | None = None
     tool_events: tuple[ToolCallLifecycleEvent, ...] = ()
+    tool_errors: tuple[str, ...] = ()
 
-    def render(self, *, include_reasoning: bool = False) -> str:
+    def render(self, *, include_reasoning: bool = False, full_tool_input: bool = False) -> str:
         lines: list[str] = []
         if include_reasoning and self.reasoning_summary:
             lines.append(f"Reasoning summary: {self.reasoning_summary}")
-        lines.extend(event.render() for event in self.tool_events)
+        lines.extend(event.render(full_input=full_tool_input) for event in self.tool_events)
+        lines.extend(f"Tool error: {error}" for error in self.tool_errors)
         return "\n".join(lines)
 
 
@@ -50,10 +54,27 @@ class GatewayReply:
 
 TraceEventHandler = Callable[[ToolCallLifecycleEvent], None]
 TextDeltaHandler = Callable[[str], None]
+MAX_RECTIFICATION_ATTEMPTS = 2
+
+
+def format_tool_input(value: object, *, limit: int | None = 50) -> str:
+    if value is None:
+        text = ""
+    elif isinstance(value, str):
+        text = value
+    else:
+        try:
+            text = json.dumps(value, ensure_ascii=True, separators=(",", ":"))
+        except TypeError:
+            text = str(value)
+    text = " ".join(text.split())
+    if limit is None:
+        return text
+    return f"{text[:limit]}..." if len(text) > limit else text
 
 
 @dataclass
-class ButlerGateway:
+class TomoGateway:
     responder: ApprovalResponder
     agent: object = field(default_factory=make_agent)
     sessions: dict[str, ChatSession] = field(default_factory=dict)
@@ -92,6 +113,34 @@ class ButlerGateway:
             on_event=on_event,
             on_text_delta=on_text_delta,
         )
+
+        for _ in range(MAX_RECTIFICATION_ATTEMPTS):
+            tool_errors = extract_tool_errors(extract_messages(result))
+            if not tool_errors:
+                break
+            messages = [
+                *messages,
+                {
+                    "role": "user",
+                    "content": rectification_prompt(tool_errors),
+                },
+            ]
+            result = self.invoke_agent_with_approvals(
+                channel_id,
+                session,
+                {"messages": messages},
+                on_event=on_event,
+                on_text_delta=on_text_delta,
+            )
+
+        if tool_errors := extract_tool_errors(extract_messages(result)):
+            result = {
+                "messages": [
+                    *extract_messages(result),
+                    {"role": "assistant", "content": unresolved_failure_reply(tool_errors)},
+                ]
+            }
+
         reply = extract_text(result)
         trace = extract_agent_trace(result)
 
@@ -132,6 +181,21 @@ class ButlerGateway:
             )
 
         return result
+
+
+def rectification_prompt(tool_errors: list[str]) -> str:
+    errors = "\n".join(f"- {error}" for error in tool_errors)
+    return (
+        "The previous attempt had failed tool output. Do not mark any related todo/task complete yet.\n"
+        "Rectify the failure before advancing: inspect the error, retry or choose a valid alternative, "
+        "and validate the result before claiming completion.\n\n"
+        f"Failed tool output:\n{errors}"
+    )
+
+
+def unresolved_failure_reply(tool_errors: list[str]) -> str:
+    errors = "\n".join(f"- {error}" for error in tool_errors)
+    return f"I could not complete the task because validation/tool execution is still failing:\n{errors}"
 
 
 def add_skill_context(text: str) -> str:
@@ -234,8 +298,7 @@ def invoke_agent_streaming(
         if hasattr(stream, "tool_calls") and hasattr(stream, "output"):
             for call in stream.tool_calls:
                 name = str(getattr(call, "tool_name", None) or getattr(call, "name", None) or "tool")
-                emitter.emit(ToolCallLifecycleEvent(name=name, status="start"))
-                emitter.emit(ToolCallLifecycleEvent(name=name, status="running"))
+                emitter.emit(ToolCallLifecycleEvent(name=name, input=getattr(call, "input", None) or getattr(call, "args", None)))
                 error = getattr(call, "error", None)
                 output_deltas = getattr(call, "output_deltas", None)
                 try:
@@ -243,10 +306,9 @@ def invoke_agent_streaming(
                         for _ in output_deltas:
                             pass
                 except Exception as exc:  # noqa: BLE001
-                    error = exc
-                completed = bool(getattr(call, "completed", False))
-                status = "success" if completed and error is None else "failed"
-                emitter.emit(ToolCallLifecycleEvent(name=name, status=status))
+                    raise RuntimeError(f"{name} failed while streaming output: {exc}") from exc
+                if error is not None:
+                    raise RuntimeError(f"{name} failed: {error}")
             return stream.output
 
     if not callable(stream):
@@ -301,7 +363,11 @@ def consume_langchain_stream(
                 consume_update_tool_events(data, emitter)
 
     if text_parts:
-        return {"messages": [{"role": "assistant", "content": "".join(text_parts)}]}
+        state = flatten_update_state(last_update or {})
+        state.setdefault("messages", [])
+        if isinstance(state["messages"], list):
+            state["messages"].append({"role": "assistant", "content": "".join(text_parts)})
+        return state
     if last_update is not None:
         return flatten_update_state(last_update)
     return {} if saw_chunk and saw_recognized_chunk else None
@@ -339,26 +405,38 @@ def consume_update_tool_events(data: Mapping[str, object], emitter: ToolEventEmi
                     name = str(call.get("name") or "tool")
                     if call_id not in emitter.started:
                         emitter.started.add(call_id)
-                        emitter.emit(ToolCallLifecycleEvent(name=name, status="start"))
-                        emitter.emit(ToolCallLifecycleEvent(name=name, status="running"))
+                        emitter.emit(ToolCallLifecycleEvent(name=name, input=call.get("input")))
         if node == "tools":
             for message in messages:
                 name = get_message_tool_name(message)
                 if name is None:
                     continue
                 call_id = get_message_tool_call_id(message) or name
-                if call_id not in emitter.finished:
-                    emitter.finished.add(call_id)
-                    status = get_message_tool_status(message)
-                    emitter.emit(ToolCallLifecycleEvent(name=name, status="failed" if status in {"error", "failed", "failure"} else "success"))
+                emitter.finished.add(call_id)
 
 
 def flatten_update_state(data: Mapping[str, object]) -> dict[str, object]:
     messages: list[object] = []
+    interrupts: list[object] = []
+    for key in ("__interrupt__", "interrupts"):
+        value = data.get(key)
+        if value:
+            interrupts.extend(value if isinstance(value, list | tuple) else [value])
     for update in data.values():
         if isinstance(update, Mapping) and isinstance(update.get("messages"), list):
             messages.extend(update["messages"])
-    return {"messages": messages}
+            continue
+        if isinstance(update, Mapping):
+            for key in ("__interrupt__", "interrupts"):
+                value = update.get(key)
+                if value:
+                    interrupts.extend(value if isinstance(value, list | tuple) else [value])
+    state: dict[str, object] = {}
+    if messages:
+        state["messages"] = messages
+    if interrupts:
+        state["__interrupt__"] = interrupts
+    return state
 
 
 def consume_raw_event_stream(
@@ -406,12 +484,9 @@ def consume_raw_tool_event(event: Mapping[str, object], emitter: ToolEventEmitte
         call_id = str(item.get("id") or item.get("tool_call_id") or name)
         if call_id not in emitter.started:
             emitter.started.add(call_id)
-            emitter.emit(ToolCallLifecycleEvent(name=name, status="start"))
-            emitter.emit(ToolCallLifecycleEvent(name=name, status="running"))
+            emitter.emit(ToolCallLifecycleEvent(name=name, input=item.get("input") or item.get("args")))
         if completed or error or status in {"completed", "failed", "error"}:
-            if call_id not in emitter.finished:
-                emitter.finished.add(call_id)
-                emitter.emit(ToolCallLifecycleEvent(name=name, status="failed" if error or status in {"failed", "error"} else "success"))
+            emitter.finished.add(call_id)
 
 
 def extract_raw_text_delta(event: Mapping[str, object]) -> str | None:
@@ -448,6 +523,7 @@ def extract_agent_trace(result: object) -> AgentTrace:
     return AgentTrace(
         reasoning_summary=extract_reasoning_summary(messages),
         tool_events=tuple(extract_tool_lifecycle_events(messages)),
+        tool_errors=tuple(extract_tool_errors(messages)),
     )
 
 
@@ -518,6 +594,31 @@ def normalize_trace_text(value: object) -> str | None:
     return None
 
 
+def extract_tool_errors(messages: list[object]) -> list[str]:
+    errors: list[str] = []
+    for message in messages:
+        if get_message_tool_name(message) is None:
+            continue
+        status = get_message_tool_status(message)
+        content = get_message_tool_content(message)
+        if is_failed_tool_result(status, content):
+            name = get_message_tool_name(message) or "tool"
+            text = format_tool_input(content, limit=200)
+            errors.append(f"{name}: {text}" if text else name)
+    return errors
+
+
+def is_failed_tool_result(status: str, content: object) -> bool:
+    if status in {"error", "failed", "failure"}:
+        return True
+    if not isinstance(content, str):
+        return False
+    if content.lower().startswith("error:"):
+        return True
+    exit_match = re.search(r"(?im)^Exit code:\s*(-?\d+)\s*$", content)
+    return bool(exit_match and int(exit_match.group(1)) != 0)
+
+
 def extract_tool_lifecycle_events(
     messages: list[object],
     *,
@@ -526,7 +627,7 @@ def extract_tool_lifecycle_events(
 ) -> list[ToolCallLifecycleEvent]:
     started = started if started is not None else set()
     finished = finished if finished is not None else set()
-    calls: dict[str, str] = {}
+    calls: set[str] = set()
     events: list[ToolCallLifecycleEvent] = []
     anonymous_index = 0
     for message in messages:
@@ -534,31 +635,23 @@ def extract_tool_lifecycle_events(
             call_id = str(call.get("id") or call.get("tool_call_id") or f"tool-{anonymous_index}")
             anonymous_index += 1
             name = str(call.get("name") or "tool")
-            calls[call_id] = name
+            calls.add(call_id)
             if call_id not in started:
                 started.add(call_id)
-                events.append(ToolCallLifecycleEvent(name=name, status="start"))
-                events.append(ToolCallLifecycleEvent(name=name, status="running"))
+                events.append(ToolCallLifecycleEvent(name=name, input=call.get("input")))
 
         tool_name = get_message_tool_name(message)
         if tool_name is None:
             continue
         tool_call_id = get_message_tool_call_id(message)
-        status = get_message_tool_status(message)
-        terminal_status = "failed" if status in {"error", "failed", "failure"} else "success"
         if tool_call_id and tool_call_id in calls:
-            if tool_call_id not in finished:
-                finished.add(tool_call_id)
-                events.append(ToolCallLifecycleEvent(name=calls[tool_call_id], status=terminal_status))
+            finished.add(tool_call_id)
         else:
             generated_id = f"tool-message-{anonymous_index}"
             if generated_id not in started:
                 started.add(generated_id)
-                events.append(ToolCallLifecycleEvent(name=tool_name, status="start"))
-                events.append(ToolCallLifecycleEvent(name=tool_name, status="running"))
-            if generated_id not in finished:
-                finished.add(generated_id)
-                events.append(ToolCallLifecycleEvent(name=tool_name, status=terminal_status))
+                events.append(ToolCallLifecycleEvent(name=tool_name, input=get_message_tool_content(message)))
+            finished.add(generated_id)
             anonymous_index += 1
     return events
 
@@ -576,12 +669,16 @@ def get_tool_calls(message: object) -> list[dict[str, object]]:
             name = call.get("name")
             if isinstance(function, Mapping):
                 name = name or function.get("name")
-            calls.append({"id": call.get("id"), "name": name or "tool"})
+                input_value = function.get("arguments")
+            else:
+                input_value = call.get("args") or call.get("input")
+            calls.append({"id": call.get("id"), "name": name or "tool", "input": input_value})
         else:
             calls.append(
                 {
                     "id": getattr(call, "id", None),
                     "name": getattr(call, "name", None) or "tool",
+                    "input": getattr(call, "args", None) or getattr(call, "input", None),
                 }
             )
     return calls
@@ -604,5 +701,9 @@ def get_message_tool_status(message: object) -> str:
     status = message.get("status") if isinstance(message, Mapping) else getattr(message, "status", None)
     if status:
         return str(status)
-    content = message.get("content") if isinstance(message, Mapping) else getattr(message, "content", "")
-    return "error" if isinstance(content, str) and content.lower().startswith("error:") else "success"
+    content = get_message_tool_content(message)
+    return "error" if is_failed_tool_result("", content) else "success"
+
+
+def get_message_tool_content(message: object) -> object:
+    return message.get("content") if isinstance(message, Mapping) else getattr(message, "content", None)

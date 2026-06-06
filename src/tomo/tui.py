@@ -17,6 +17,7 @@ from .agent import SKILL_SOURCES, extract_text, make_agent
 from .config import settings
 from .gateway import ToolEventEmitter, approval_request_from_actions, extract_agent_trace, extract_interrupts, invoke_agent_streaming
 from .session_store import ChatSession, create_session, list_sessions, load_session, save_session
+from .slash_commands import SlashCommandCompleter, slash_prefix, status_hint, unrecognized_message
 from .token_store import load_tokens
 from .tools import ApprovalRequest
 
@@ -48,6 +49,7 @@ class PromptChat:
     awaiting_session_selection: bool = False
     session_choices: list[ChatSession] = field(default_factory=list)
     streaming_speaker: str | None = None
+    debug_tool: bool = False
 
     def __post_init__(self) -> None:
         self.header = Label(self.header_text())
@@ -58,8 +60,10 @@ class PromptChat:
             height=1,
             focus_on_click=True,
             accept_handler=self.handle_input,
+            completer=SlashCommandCompleter("chat"),
+            complete_while_typing=True,
         )
-        self.status = Label("Commands: /session, /clear, /exit · Scroll chat: PgUp/PgDn or mouse wheel")
+        self.status = Label(status_hint("chat"))
         self._render_transcript()
         if self.app is None:
             self.app = self._build_app()
@@ -102,7 +106,7 @@ class PromptChat:
             self.app.exit()
 
     def header_text(self) -> str:
-        return f"Butler · DeepAgents project chat · {settings.model} · {self.session.metadata.name} · {self.session.metadata.id[:8]}"
+        return f"Tomo · DeepAgents project chat · {settings.model} · {self.session.metadata.name} · {self.session.metadata.id[:8]}"
 
     def handle_input(self, buffer: object) -> bool:
         text = getattr(buffer, "text", "").strip()
@@ -116,7 +120,7 @@ class PromptChat:
             self.select_session(text)
             return True
         if self.busy:
-            self.append_line("System", "Busy. Wait for Butler to finish or answer the approval prompt.")
+            self.append_line("System", "Busy. Wait for Tomo to finish or answer the approval prompt.")
             return True
         if self.handle_command(text):
             return True
@@ -124,6 +128,8 @@ class PromptChat:
         return True
 
     def handle_command(self, text: str) -> bool:
+        if slash_prefix(text) is None:
+            return False
         if text == "/exit":
             self.stop()
             return True
@@ -136,7 +142,23 @@ class PromptChat:
         if text == "/session":
             self.show_sessions()
             return True
-        return False
+        if slash_prefix(text) == "/debug-tool":
+            self.handle_debug_tool_command(text)
+            return True
+        self.append_line("System", unrecognized_message(text, "chat"))
+        return True
+
+    def handle_debug_tool_command(self, text: str) -> None:
+        argument = command_argument(text)
+        if argument == "enable":
+            self.debug_tool = True
+            self.append_line("System", "Tool debug output enabled.")
+            return
+        if argument == "disable":
+            self.debug_tool = False
+            self.append_line("System", "Tool debug output disabled.")
+            return
+        self.append_line("System", "Usage: /debug-tool enable or /debug-tool disable.")
 
     def show_sessions(self) -> None:
         sessions = list_sessions()
@@ -156,7 +178,7 @@ class PromptChat:
         if not choice:
             self.awaiting_session_selection = False
             self.session_choices = []
-            self.status.text = "Commands: /session, /clear, /exit · Scroll chat: PgUp/PgDn or mouse wheel"
+            self.status.text = status_hint("chat")
             self.append_line("System", "Session selection cancelled.")
             return
         try:
@@ -173,7 +195,7 @@ class PromptChat:
         self.header.text = self.header_text()
         self.awaiting_session_selection = False
         self.session_choices = []
-        self.status.text = "Commands: /session, /clear, /exit · Scroll chat: PgUp/PgDn or mouse wheel"
+        self.status.text = status_hint("chat")
         self._render_transcript()
         self.append_line("System", f"Loaded session: {self.session.metadata.name} · {self.session.metadata.id[:8]}")
 
@@ -193,7 +215,7 @@ class PromptChat:
             streamed_reply_parts: list[str] = []
             result = self.invoke_agent_with_approvals(
                 {"messages": messages},
-                on_text_delta=lambda delta: (streamed_reply_parts.append(delta), self.append_text_delta("Butler", delta)),
+                on_text_delta=lambda delta: (streamed_reply_parts.append(delta), self.append_text_delta("Tomo", delta)),
             )
             reply = extract_text(result)
             trace = extract_agent_trace(result)
@@ -207,10 +229,10 @@ class PromptChat:
             if streamed_reply_parts:
                 self.streaming_speaker = None
             else:
-                self.append_line("Butler", reply)
+                self.append_line("Tomo", reply)
         finally:
             self.busy = False
-            self.status.text = "Commands: /session, /clear, /exit · Scroll chat: PgUp/PgDn or mouse wheel"
+            self.status.text = status_hint("chat")
             self.invalidate()
 
     def add_skill_context(self, text: str) -> str:
@@ -244,7 +266,7 @@ class PromptChat:
 
     def invoke_agent_with_approvals(self, payload: object, on_text_delta=None) -> object:
         config = {"configurable": {"thread_id": self.session.metadata.id}}
-        emitter = ToolEventEmitter(lambda event: self.append_line("Tool", event.render()))
+        emitter = ToolEventEmitter(lambda event: self.append_line("Tool", event.render(full_input=self.debug_tool)))
         result = invoke_agent_streaming(self.agent, payload, config, emitter, on_text_delta=on_text_delta)
 
         while interrupts := self.extract_interrupts(result):
@@ -343,13 +365,13 @@ class PromptChat:
 
     def _render_transcript(self) -> None:
         if not self.session.messages:
-            self.output.text = "Butler: Ready. Tools enabled: ls, read_file, glob, grep, write_file, edit_file, bash."
+            self.output.text = "Tomo: Ready. Tools enabled: read_file, glob, files_search, terminal."
             self.scroll_chat_to_bottom()
             return
         rendered: list[str] = []
         for message in self.session.messages:
             role = message.get("role", "assistant")
-            title = "You" if role == "user" else "Butler"
+            title = "You" if role == "user" else "Tomo"
             rendered.append(f"{title}: {message.get('content', '')}")
         self.output.text = "\n\n".join(rendered)
         self.scroll_chat_to_bottom()
@@ -357,9 +379,16 @@ class PromptChat:
 
 def run_chat() -> None:
     if load_tokens() is None:
-        print("Not logged in. Run `uv run butler login` first.")
+        print("Not logged in. Run `uv run tomo login` first.")
         return
     session = create_session()
     save_session(session)
     chat = PromptChat(session=session, agent=make_agent())
     chat.run()
+
+
+def command_argument(text: str) -> str | None:
+    parts = text.strip().split(maxsplit=1)
+    if len(parts) < 2:
+        return None
+    return parts[1].strip().lower() or None

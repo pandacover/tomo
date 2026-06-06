@@ -125,7 +125,7 @@ def wait_for_callback(port: int, expected_state: str, timeout_seconds: int = 180
             self.send_response(200 if "code" in result else 400)
             self.send_header("Content-Type", "text/plain")
             self.end_headers()
-            self.wfile.write(b"You can close this tab and return to Butler.")
+            self.wfile.write(b"You can close this tab and return to Tomo.")
             event.set()
 
         def log_message(self, format: str, *args: object) -> None:
@@ -162,7 +162,7 @@ def wait_for_callback(port: int, expected_state: str, timeout_seconds: int = 180
 def _read_manual_code(manual_codes: queue.Queue[str], event: threading.Event) -> None:
     if not sys.stdin.isatty():
         return
-    print("If the browser cannot reach Butler, paste the code from xAI here and press Enter:")
+    print("If the browser cannot reach Tomo, paste the code from xAI here and press Enter:")
     try:
         code = input().strip()
     except EOFError:
@@ -213,7 +213,7 @@ def refresh_tokens(tokens: TokenSet) -> TokenSet:
 def get_valid_tokens() -> TokenSet:
     tokens = load_tokens()
     if tokens is None:
-        raise RuntimeError("Not logged in. Run `uv run butler login` first.")
+        raise RuntimeError("Not logged in. Run `uv run tomo login` first.")
     if tokens.expired:
         return refresh_tokens(tokens)
     return tokens
