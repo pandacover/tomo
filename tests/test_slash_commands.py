@@ -41,8 +41,10 @@ def test_status_hint_lists_surface_commands():
     assert "/session" in status_hint("chat")
     assert "/debug-tool" in status_hint("chat")
     assert "/reasoning" in status_hint("chat")
+    assert "/orchestrator" not in status_hint("chat")
     assert "/approve" in status_hint("gateway")
     assert "/reasoning" in status_hint("gateway")
+    assert "/orchestrator" not in status_hint("gateway")
     assert "/yolo" in status_hint("gateway")
     assert "/debug-tool" in status_hint("gateway")
 

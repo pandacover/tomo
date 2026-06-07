@@ -17,6 +17,8 @@ import httpx
 from langchain_core.tools import tool
 from rank_bm25 import BM25Okapi
 
+from .browser_tools import browser
+
 
 MAX_BASH_OUTPUT = 20_000
 BASH_TIMEOUT_SECONDS = 60
@@ -50,19 +52,35 @@ def set_approval_handler(handler: ApprovalHandler | None) -> None:
 
 
 def get_tools():
-    return [files_search, terminal, web_search, web_fetch, append_memory, read_memory, schedule_task]
+    return [files_search, terminal, browser, web_search, web_fetch, append_memory, read_memory, schedule_task]
 
 
 @tool("terminal")
-def terminal(command: str) -> str:
-    """Run a non-interactive bash command in the workspace. Use for tests, project CLIs, git/status checks, package commands, file metadata, and exact command output."""
+def terminal(command: str, cwd: str = ".") -> str:
+    """Run a fresh non-interactive bash command.
+
+cwd defaults to "." which means the workspace root/current launch directory.
+Shell state does not persist between calls. Use cwd for subdirectories.
+Do not prefix commands with cd <workspace> &&; terminal already starts there.
+Use for tests, project CLIs, git/status checks, package commands, file metadata, and exact command output.
+"""
     blocked = _blocked_bash_reason(command)
     if blocked:
         return f"Error: blocked terminal command: {blocked}"
+
+    target_cwd = _resolve_path(cwd)
+    reason = _approval_reason(target_cwd)
+    if reason:
+        return f"Error: cwd {cwd} {reason}"
+    if not target_cwd.exists():
+        return f"Error: cwd {cwd} does not exist."
+    if not target_cwd.is_dir():
+        return f"Error: cwd {cwd} is not a directory."
+
     try:
         result = subprocess.run(
             command,
-            cwd=_workspace(),
+            cwd=target_cwd,
             shell=True,
             executable="/bin/bash",
             text=True,
@@ -80,7 +98,9 @@ def terminal(command: str) -> str:
     output = output.strip()
     if len(output) > MAX_BASH_OUTPUT:
         output = output[:MAX_BASH_OUTPUT] + "\n... output truncated ..."
-    return f"Exit code: {result.returncode}\n{output}" if output else f"Exit code: {result.returncode}"
+
+    prefix = f"CWD: {target_cwd}\nExit code: {result.returncode}"
+    return f"{prefix}\n{output}" if output else prefix
 
 
 @tool("schedule_task")
@@ -108,6 +128,7 @@ def files_search(query: str, path: str = ".", k: int = 20) -> str:
     """Search local workspace text with ripgrep and BM25-rank matching lines. Use to find code, symbols, config, tests, docs, and references before reading files."""
     if not query or not query.strip():
         return "Error: search query cannot be empty."
+    query = normalize_search_query(query)
     target = _resolve_path(path)
     reason = _approval_reason(target)
     if reason:
@@ -134,6 +155,10 @@ def files_search(query: str, path: str = ".", k: int = 20) -> str:
     lines = result.stdout.splitlines()
     ranked = rank_texts(query, lines, k=k)
     return "\n".join(ranked) if ranked else "No matches found."
+
+
+def normalize_search_query(query: str) -> str:
+    return " ".join(query.split())
 
 
 @tool("web_search")

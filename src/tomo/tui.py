@@ -116,7 +116,7 @@ class PromptChat:
             self.app.exit()
 
     def header_text(self) -> str:
-        return f"Tomo · DeepAgents project chat · {settings.model} · {self.session.metadata.name} · {self.session.metadata.id[:8]}"
+        return f"Tomo · project chat · {settings.model} · {self.session.metadata.name} · {self.session.metadata.id[:8]}"
 
     def handle_input(self, buffer: object) -> bool:
         text = getattr(buffer, "text", "").strip()
@@ -418,7 +418,11 @@ def run_chat() -> None:
     session = create_session()
     save_session(session)
     effort = effective_reasoning_effort()
-    chat = PromptChat(session=session, agent=make_agent(reasoning_effort=effort), reasoning_effort=effort)
+    chat = PromptChat(
+        session=session,
+        agent=make_agent(reasoning_effort=effort),
+        reasoning_effort=effort,
+    )
     chat.run()
 
 

@@ -1,63 +1,11 @@
 from __future__ import annotations
 
-import logging
 from pathlib import Path
 from types import SimpleNamespace
 
-from langchain.agents.middleware import TodoListMiddleware
-
-from tomo.agent import (
-    DEFAULT_INTERRUPT_ON,
-    EXCLUDED_BUILTIN_TOOLS,
-    SYSTEM_PROMPT,
-    TOOL_DESCRIPTION_OVERRIDES,
-    TomoTodoListMiddleware,
-    SKILLS_LOGGER,
-    SKILL_SOURCES,
-    extract_text,
-    workspace_permissions,
-)
+from tomo.agent import SYSTEM_PROMPT, SKILL_SOURCES, extract_text
 from tomo import tools
 from tomo.tools import get_tools, rank_texts
-
-
-def test_agent_permissions_allow_outside_workspace_after_dotfile_deny():
-    rules = workspace_permissions()
-
-    workspace = Path.cwd().resolve().as_posix()
-    assert rules[0].mode == "allow"
-    assert rules[0].operations == ["read", "write"]
-    assert rules[1].mode == "deny"
-    assert "/**/.*" in rules[1].paths
-    assert "/**/.*/**" in rules[1].paths
-    assert rules[2].mode == "allow"
-    assert rules[2].paths == [f"{workspace}/**", workspace]
-    assert rules[3].mode == "allow"
-    assert rules[3].paths == ["/**"]
-
-
-def test_agent_interrupts_filesystem_and_terminal_tools_for_approval():
-    assert set(DEFAULT_INTERRUPT_ON) == {
-        "read_file",
-        "glob",
-        "terminal",
-        "write_file",
-        "edit_file",
-    }
-
-
-def test_agent_keeps_safe_deepagents_edit_tools_available():
-    assert EXCLUDED_BUILTIN_TOOLS == frozenset({"grep", "ls"})
-
-
-def test_tomo_todo_middleware_keeps_planning_but_requires_validation():
-    middleware = TomoTodoListMiddleware()
-
-    assert isinstance(middleware, TodoListMiddleware)
-    assert "write_todos" == middleware.tools[0].name
-    assert "does not read, write, or edit project files" in middleware.tool_description
-    assert "after suitable validation passed" in middleware.tool_description
-    assert "fully finished and validated" in middleware.system_prompt
 
 
 def test_system_prompt_requires_fenced_markdown_artifacts():
@@ -74,17 +22,22 @@ def test_system_prompt_documents_telegram_lifecycle_commands():
     assert "`.tomo/telegram.log`" in SYSTEM_PROMPT
 
 
-def test_agent_overrides_remaining_builtin_tool_descriptions():
-    assert set(TOOL_DESCRIPTION_OVERRIDES) == {"read_file", "glob"}
-
-
 def test_skill_sources_match_cli_precedence():
     assert SKILL_SOURCES == [
-        str(Path.home() / ".deepagents" / "tomo" / "skills"),
         str(Path.home() / ".agents" / "skills"),
-        str(Path.cwd() / ".deepagents" / "skills"),
         str(Path.cwd() / ".agents" / "skills"),
+        str(Path.cwd() / "skills"),
     ]
+
+
+def test_browser_tool_skill_exists_in_local_skill_folder():
+    skill = Path("skills/browser-tool/SKILL.md")
+
+    assert skill.exists()
+    content = skill.read_text(encoding="utf-8")
+    assert "name: browser-tool" in content
+    assert "Use Tomo's browser tool reliably" in content
+    assert "Do not screenshot `about:blank`" in content
 
 
 def test_project_tools_include_primitive_file_tools_and_search():
@@ -92,6 +45,7 @@ def test_project_tools_include_primitive_file_tools_and_search():
     assert names == {
         "files_search",
         "terminal",
+        "browser",
         "web_search",
         "web_fetch",
         "append_memory",
@@ -127,11 +81,65 @@ def test_files_search_reports_rg_exit_two_as_error(tmp_path, monkeypatch):
     assert tools.files_search.invoke({"query": "["}) == "Error: rg exited with code 2\nrg: bad pattern"
 
 
-def test_skills_logger_warnings_are_suppressed_in_tui():
-    SKILLS_LOGGER.setLevel(logging.ERROR)
-    assert SKILLS_LOGGER.getEffectiveLevel() == logging.ERROR
+def test_files_search_normalizes_multiline_queries(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    seen: dict[str, object] = {}
+
+    def fake_run(command, *args, **kwargs):
+        seen["command"] = command
+        return SimpleNamespace(returncode=1, stdout="", stderr="")
+
+    monkeypatch.setattr(tools.subprocess, "run", fake_run)
+
+    assert tools.files_search.invoke({"query": "index.html\npackage.json"}) == "No matches found."
+    assert "\n" not in str(seen["command"])
 
 
 def test_extract_text_does_not_render_empty_internal_state():
     assert extract_text({}) == ""
     assert extract_text({"messages": []}) == ""
+
+
+def test_system_prompt_mentions_browser_for_web_dev_tasks():
+    assert "- browser: use a real headless Chromium browser" in SYSTEM_PROMPT
+    assert "For web UI/dev tasks, use browser" in SYSTEM_PROMPT
+
+
+def test_terminal_runs_from_workspace_by_default(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    result = tools.terminal.invoke({"command": "pwd"})
+
+    assert f"CWD: {tmp_path}" in result
+    assert str(tmp_path) in result
+    assert "Exit code: 0" in result
+
+
+def test_terminal_accepts_relative_cwd(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    subdir = tmp_path / "src"
+    subdir.mkdir()
+
+    result = tools.terminal.invoke({"command": "pwd", "cwd": "src"})
+
+    assert f"CWD: {subdir}" in result
+    assert str(subdir) in result
+    assert "Exit code: 0" in result
+
+
+def test_terminal_rejects_missing_cwd(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    result = tools.terminal.invoke({"command": "pwd", "cwd": "missing"})
+
+    assert result == "Error: cwd missing does not exist."
+
+
+def test_terminal_rejects_file_cwd(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    file_path = tmp_path / "not-dir.txt"
+    file_path.write_text("x")
+
+    result = tools.terminal.invoke({"command": "pwd", "cwd": "not-dir.txt"})
+
+    assert result == "Error: cwd not-dir.txt is not a directory."

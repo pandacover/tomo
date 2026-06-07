@@ -303,7 +303,7 @@ class EventStreamingAgent:
         raise AssertionError("invoke fallback should not be used")
 
 
-def test_tomo_gateway_uses_deepagents_stream_events_projection(tmp_path, monkeypatch):
+def test_tomo_gateway_uses_stream_events_projection(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     agent = EventStreamingAgent()
     gateway = TomoGateway(responder=Responder(), agent=agent)
@@ -471,6 +471,26 @@ def test_tomo_gateway_uses_messages_updates_stream_without_tool_output_reply(tmp
     assert events == ['web_search: "{"query":"Hermes Agent"}"']
     assert deltas == ["Hermes", " Agent"]
     assert reply.text == "Hermes Agent"
+
+
+class LangGraphFinalMessageStreamingAgent:
+    def stream(self, payload: object, **kwargs: object):
+        yield {"type": "messages", "data": (FakeToken([{"type": "text", "text": "Hello"}]), {"langgraph_node": "model"})}
+        final = SimpleNamespace(type="ai", content="Hello", tool_calls=[])
+        yield {"type": "messages", "data": (final, {"langgraph_node": "model"})}
+        yield {"type": "updates", "data": {"model": {"messages": [final]}}}
+        yield {"type": "updates", "data": {"final_response": None}}
+
+
+def test_tomo_gateway_does_not_stream_final_langgraph_message_twice(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    gateway = TomoGateway(responder=Responder(), agent=LangGraphFinalMessageStreamingAgent())
+    deltas: list[str] = []
+
+    reply = gateway.send_text_with_events("chat-1", "say hello", on_text_delta=deltas.append)
+
+    assert deltas == ["Hello"]
+    assert reply.text == "Hello"
 
 
 def test_tomo_gateway_preserves_streaming_interrupts_for_approval(tmp_path, monkeypatch):

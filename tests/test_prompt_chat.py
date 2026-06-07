@@ -216,7 +216,7 @@ class InterruptingAgent:
         return {"messages": [{"role": "assistant", "content": "done"}]}
 
 
-def test_prompt_chat_resumes_deepagents_interrupt_with_approval():
+def test_prompt_chat_resumes_interrupt_with_approval():
     agent = InterruptingAgent()
     chat = PromptChat(session=create_session(), agent=agent, app=FakeApp())
     result: dict[str, object] = {}

@@ -1,6 +1,6 @@
 # Tomo
 
-Tomo is a v1 DeepAgents project chat using Python, uv, LangChain xAI, prompt_toolkit, and SuperGrok OAuth.
+Tomo is a v1 project chat using Python, uv, LangGraph, LangChain xAI, prompt_toolkit, and SuperGrok OAuth.
 
 ## Setup
 

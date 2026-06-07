@@ -1,14 +1,15 @@
 [project]
 name = "tomo"
 version = "0.1.0"
-description = "A primitive-tools Deep Agents chat interface backed by SuperGrok OAuth."
+description = "A primitive-tools project chat interface backed by SuperGrok OAuth."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "deepagents>=0.6.7",
     "httpx>=0.28.0",
     "langchain>=1.0.0",
+    "langgraph>=1.2.4",
     "langchain-xai>=1.0.0",
+    "playwright>=1.56.0",
     "prompt-toolkit>=3.0.52",
     "pydantic-settings>=2.0.0",
     "rank-bm25>=0.2.2",

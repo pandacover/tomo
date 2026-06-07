@@ -92,7 +92,7 @@ class TomoGateway:
     def get_agent(self, channel_id: str) -> object:
         if channel_id not in self.channel_reasoning_effort:
             return self.agent
-        effort = self.channel_reasoning_effort[channel_id]
+        effort = self.channel_reasoning_effort.get(channel_id, effective_reasoning_effort())
         cached = self.agents_by_effort.get(effort)
         if cached is not None:
             return cached
@@ -361,7 +361,7 @@ def consume_langchain_stream(
         return None
 
     text_parts: list[str] = []
-    last_update: object | None = None
+    accumulated_updates: dict[str, object] = {}
     saw_chunk = False
     saw_recognized_chunk = False
     for chunk in iterator:
@@ -381,17 +381,18 @@ def consume_langchain_stream(
             saw_recognized_chunk = True
             data = chunk.get("data")
             if isinstance(data, Mapping):
-                last_update = data
+                accumulated_updates.update(data)
                 consume_update_tool_events(data, emitter)
 
+    state = flatten_update_state(accumulated_updates)
     if text_parts:
-        state = flatten_update_state(last_update or {})
         state.setdefault("messages", [])
-        if isinstance(state["messages"], list):
-            state["messages"].append({"role": "assistant", "content": "".join(text_parts)})
+        streamed_text = "".join(text_parts)
+        if isinstance(state["messages"], list) and not has_assistant_message_content(state["messages"], streamed_text):
+            state["messages"].append({"role": "assistant", "content": streamed_text})
         return state
-    if last_update is not None:
-        return flatten_update_state(last_update)
+    if accumulated_updates:
+        return state
     return {} if saw_chunk and saw_recognized_chunk else None
 
 
@@ -402,6 +403,8 @@ def extract_langchain_message_delta(chunk: Mapping[str, object]) -> str | None:
     token, metadata = data
     if isinstance(metadata, Mapping) and metadata.get("langgraph_node") == "tools":
         return None
+    if is_full_langchain_message(token):
+        return None
     blocks = getattr(token, "content_blocks", None)
     if isinstance(blocks, list):
         text = "".join(str(block.get("text", "")) for block in blocks if isinstance(block, Mapping) and block.get("type") == "text")
@@ -411,6 +414,33 @@ def extract_langchain_message_delta(chunk: Mapping[str, object]) -> str | None:
         return text
     content = getattr(token, "content", None)
     return content if isinstance(content, str) and content else None
+
+
+def is_full_langchain_message(token: object) -> bool:
+    token_type = str(getattr(token, "type", ""))
+    class_name = token.__class__.__name__
+    if class_name.endswith("Chunk"):
+        return False
+    return token_type in {"ai", "assistant", "human", "user", "system", "tool"} or class_name in {
+        "AIMessage",
+        "HumanMessage",
+        "SystemMessage",
+        "ToolMessage",
+    }
+
+
+def has_assistant_message_content(messages: list[object], content: str) -> bool:
+    for message in messages:
+        role = message.get("role") if isinstance(message, Mapping) else getattr(message, "role", None)
+        message_type = message.get("type") if isinstance(message, Mapping) else getattr(message, "type", None)
+        if role not in {"assistant", "ai", None} and message_type not in {"ai", "assistant", None}:
+            continue
+        if get_message_tool_name(message) is not None:
+            continue
+        message_content = message.get("content") if isinstance(message, Mapping) else getattr(message, "content", None)
+        if message_content == content:
+            return True
+    return False
 
 
 def consume_update_tool_events(data: Mapping[str, object], emitter: ToolEventEmitter) -> None:
