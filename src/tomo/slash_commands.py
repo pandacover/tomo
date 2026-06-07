@@ -31,6 +31,7 @@ CHAT_COMMANDS: tuple[SlashCommand, ...] = (
     SlashCommand("session", "List or switch saved sessions", frozenset({"chat"})),
     SlashCommand("clear", "Clear the current session", frozenset({"chat"})),
     SlashCommand("debug-tool", "Show full tool prompts", frozenset({"chat"})),
+    SlashCommand("reasoning", "Set reasoning effort or trace display", frozenset({"chat"})),
     SlashCommand("exit", "Quit Tomo", frozenset({"chat"})),
 )
 
@@ -41,6 +42,7 @@ GATEWAY_COMMANDS: tuple[SlashCommand, ...] = (
     SlashCommand("deny", "Deny a pending tool call", frozenset({"gateway"})),
     SlashCommand("yolo", "Toggle approval-free tool execution", frozenset({"gateway"})),
     SlashCommand("debug-tool", "Show full tool prompts", frozenset({"gateway"}), telegram_name="debug_tool"),
+    SlashCommand("reasoning", "Set reasoning effort or trace display", frozenset({"gateway"})),
 )
 
 ALL_COMMANDS: tuple[SlashCommand, ...] = CHAT_COMMANDS + GATEWAY_COMMANDS

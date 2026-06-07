@@ -15,6 +15,13 @@ import httpx
 
 from .config import settings
 from .gateway import TomoGateway
+from .reasoning import (
+    effective_reasoning_effort,
+    effective_show_reasoning_trace,
+    format_reasoning_status,
+    parse_reasoning_command_args,
+    reasoning_usage_message,
+)
 from .slash_commands import slash_prefix, telegram_bot_commands, unrecognized_message
 from .telegram_config import parse_allowed_chat_ids, resolved_telegram_config
 from .token_store import load_tokens
@@ -109,6 +116,9 @@ class TelegramGateway:
         if command in {"/debug-tool", "/debug_tool"}:
             self.handle_debug_tool_command(chat_id, text)
             return
+        if command == "/reasoning":
+            self.handle_reasoning_command(chat_id, text)
+            return
         pending = self.pending_approvals.get(chat_id)
         if pending is not None:
             self.resolve_approval(chat_id, command or text, pending)
@@ -146,7 +156,10 @@ class TelegramGateway:
         except Exception as exc:  # noqa: BLE001
             self.send_message(chat_id, f"Error: {exc}")
         else:
-            if settings.show_reasoning_summary and reply.trace.reasoning_summary:
+            trace_overrides = getattr(self.tomo, "channel_trace_override", {})
+            if effective_show_reasoning_trace(
+                chat_override=trace_overrides.get(chat_id) if isinstance(trace_overrides, dict) else None
+            ) and reply.trace.reasoning_summary:
                 self.send_message(chat_id, f"Reasoning summary: {reply.trace.reasoning_summary}")
             for error in reply.trace.tool_errors:
                 self.send_message(chat_id, f"Tool error: {error}")
@@ -234,6 +247,28 @@ class TelegramGateway:
             self.send_message(chat_id, "Tool debug output disabled.")
             return
         self.send_message(chat_id, "Usage: /debug-tool enable or /debug-tool disable.")
+
+    def handle_reasoning_command(self, chat_id: str, text: str) -> None:
+        action, value = parse_reasoning_command_args(telegram_command_argument(text))
+        if action == "status":
+            effort_map = getattr(self.tomo, "channel_reasoning_effort", {})
+            trace_map = getattr(self.tomo, "channel_trace_override", {})
+            effort = (effort_map.get(chat_id) if isinstance(effort_map, dict) else None) or effective_reasoning_effort()
+            trace = effective_show_reasoning_trace(
+                chat_override=trace_map.get(chat_id) if isinstance(trace_map, dict) else None
+            )
+            self.send_message(chat_id, format_reasoning_status(effort=effort, trace=trace))
+            return
+        if action == "effort" and value is not None:
+            self.tomo.set_channel_reasoning_effort(chat_id, value)
+            self.send_message(chat_id, f"Reasoning effort set to {value}. Applies to subsequent messages in this chat.")
+            return
+        if action == "trace" and value is not None:
+            enabled = value == "on"
+            self.tomo.set_channel_trace_override(chat_id, enabled)
+            self.send_message(chat_id, f"Reasoning trace {'enabled' if enabled else 'disabled'} for this chat.")
+            return
+        self.send_message(chat_id, reasoning_usage_message())
 
     def send_message(self, chat_id: str, text: str) -> list[int]:
         message_ids: list[int] = []

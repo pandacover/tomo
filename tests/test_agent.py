@@ -89,7 +89,15 @@ def test_skill_sources_match_cli_precedence():
 
 def test_project_tools_include_primitive_file_tools_and_search():
     names = {tool.name for tool in get_tools()}
-    assert names == {"files_search", "terminal", "web_search", "web_fetch", "append_memory", "read_memory"}
+    assert names == {
+        "files_search",
+        "terminal",
+        "web_search",
+        "web_fetch",
+        "append_memory",
+        "read_memory",
+        "schedule_task",
+    }
 
 
 def test_rank_texts_prefers_relevant_results():

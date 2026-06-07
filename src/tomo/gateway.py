@@ -10,6 +10,7 @@ from typing import Callable, Protocol
 from langgraph.types import Command
 
 from .agent import SKILL_SOURCES, extract_text, make_agent
+from .reasoning import effective_reasoning_effort
 from .session_store import ChatSession, create_session, save_session
 from .tools import ApprovalRequest
 
@@ -78,6 +79,26 @@ class TomoGateway:
     responder: ApprovalResponder
     agent: object = field(default_factory=make_agent)
     sessions: dict[str, ChatSession] = field(default_factory=dict)
+    agents_by_effort: dict[str, object] = field(default_factory=dict)
+    channel_reasoning_effort: dict[str, str] = field(default_factory=dict)
+    channel_trace_override: dict[str, bool | None] = field(default_factory=dict)
+
+    def set_channel_reasoning_effort(self, channel_id: str, effort: str) -> None:
+        self.channel_reasoning_effort[channel_id] = effort
+
+    def set_channel_trace_override(self, channel_id: str, enabled: bool | None) -> None:
+        self.channel_trace_override[channel_id] = enabled
+
+    def get_agent(self, channel_id: str) -> object:
+        if channel_id not in self.channel_reasoning_effort:
+            return self.agent
+        effort = self.channel_reasoning_effort[channel_id]
+        cached = self.agents_by_effort.get(effort)
+        if cached is not None:
+            return cached
+        built = make_agent(reasoning_effort=effort)
+        self.agents_by_effort[effort] = built
+        return built
 
     def get_session(self, channel_id: str) -> ChatSession:
         session = self.sessions.get(channel_id)
@@ -158,7 +179,8 @@ class TomoGateway:
     ) -> object:
         config = {"configurable": {"thread_id": session.metadata.id}}
         emitted = ToolEventEmitter(on_event)
-        result = invoke_agent_streaming(self.agent, payload, config, emitted, on_text_delta=on_text_delta)
+        agent = self.get_agent(channel_id)
+        result = invoke_agent_streaming(agent, payload, config, emitted, on_text_delta=on_text_delta)
 
         while interrupts := extract_interrupts(result):
             interrupt_value = interrupts[0].value
@@ -173,7 +195,7 @@ class TomoGateway:
                 for _ in action_requests
             ]
             result = invoke_agent_streaming(
-                self.agent,
+                agent,
                 Command(resume={"decisions": decisions}),
                 config,
                 emitted,

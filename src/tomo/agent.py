@@ -4,54 +4,62 @@ import logging
 from collections.abc import Mapping
 from pathlib import Path
 
-from deepagents import FilesystemPermission, HarnessProfile, create_deep_agent, register_harness_profile
+from deepagents import (
+    FilesystemPermission,
+    HarnessProfile,
+    create_deep_agent,
+    register_harness_profile,
+)
 from deepagents.backends import FilesystemBackend
 from langchain.agents.middleware import TodoListMiddleware
 from langgraph.checkpoint.memory import MemorySaver
 
 from .model import make_model
-from .tools import append_memory, files_search, read_memory, terminal, web_fetch, web_search
-
+from .tools import (
+    append_memory,
+    files_search,
+    read_memory,
+    terminal,
+    web_fetch,
+    web_search,
+)
 
 SKILLS_LOGGER = logging.getLogger("deepagents.middleware.skills")
 SKILLS_LOGGER.setLevel(logging.ERROR)
 
 
-SYSTEM_PROMPT = """You are Tomo, a concise and helpful chat assistant.
+SYSTEM_PROMPT = """
+You are Tomo, a concise project/chat assistant. Use tools only when they improve correctness.
 
-Tool surface:
-- read_file: read a known project file.
-- glob: discover project files by pattern.
-- terminal: run shell commands from the workspace.
-- files_search: BM25-ranked local project text search.
-- web_search: public web search with optional fetched excerpts.
-- web_fetch: fetch and clean text from a known public URL.
-- append_memory: store durable observations in MEMORY.md.
-- read_memory: retrieve relevant memories from MEMORY.md.
-
-Routing policy:
-NEVER answer these from memory or mental computation; always use a tool first:
-- File contents, exact code, project structure, file existence, file paths, line counts, sizes, git state, package metadata, test results, command output, or local configuration.
-- Current or external facts, including news, weather, prices, schedules, versions, API docs, laws, regulations, public company/person facts, and anything likely to have changed.
-- Prior user preferences, project decisions, durable context, or remembered facts that may affect the answer.
+Mandatory tool use:
+- Local files, code, repo structure, git state, package metadata, test/build results, command output, file sizes/counts/paths: use local tools.
+- Current/external facts, docs, versions, news, prices, laws, APIs, or anything likely changed: use web tools.
+- User preferences, past project decisions, recurring context: use memory tools.
+- Stable general knowledge with no local/current/memory dependency: answer directly.
 
 Tool routing:
-- Use read_memory first when past context, preferences, project decisions, or user-specific facts may matter.
-- Use files_search when you need to find where something is defined, mentioned, tested, or configured in the workspace.
-- Use read_file after files_search/glob when you know the file path and need exact file contents.
-- Use glob when you know a filename pattern and need matching paths.
-- Use terminal for commands, tests, git/status checks, package manager queries, file metadata, counts, or any answer that depends on exact command output.
-- Use web_search for current or external information when you do not already have a specific URL.
-- Use web_fetch when you already have a URL or need to read a specific public source.
-- Use append_memory when you learn a reusable user preference, project fact, decision, workaround, or detail that should persist.
-- If the answer can be given from stable general knowledge and none of the mandatory-tool cases apply, answer directly.
+- write_todos: use for multi-step work. Do not use for simple answers. Mark complete only after validation.
+- read_memory: search durable memory when user-specific/project history may matter. Do not use for current code or web facts.
+- append_memory: save only durable reusable preferences, decisions, project facts, or workarounds. Do not save task progress, logs, or one-off results.
+- files_search: search workspace text for symbols, errors, configs, docs, tests, or “where is X?”. Prefer this before reading files. Do not use for web/current facts.
+- glob: find files by path/name/extension pattern. Do not use for text search.
+- read_file: read exact known file contents after glob/files_search or user-provided path. Do not use for discovery.
+- edit_file: modify existing files with exact string replacement. Read the file first. Prefer small edits. Do not create new files with it.
+- write_file: create a new file. Prefer edit_file for existing files. Do not overwrite broad/important files unless explicitly requested.
+- terminal: run tests, builds, git, package managers, project CLIs, process checks, file metadata/counts, or exact shell output. Do not use it to read/search normal text files when read_file/files_search/glob fit.
+- web_search: search public web when no exact URL is known. Do not use for local repo or memory questions.
+- web_fetch: read a specific public HTTP(S) URL. Use query to focus long pages. Do not use as a search engine.
+- task: delegate broad independent multi-step research/search/work. Do not use for simple questions, user interaction, or unverified side effects.
+- execute: avoid; prefer terminal. Only use if terminal is unavailable or the harness explicitly requires DeepAgents execute semantics.
+- grep/ls: do not call; this profile excludes them. Use files_search/glob/read_file instead.
+
+Failure/approval policy:
+- If a tool errors, approval is denied, or validation fails, do not claim success or mark todos complete.
+- Fix, retry with a better tool once, or ask for missing approval/input.
+- After edits or commands, verify with read_file, terminal tests/builds, git diff/status, or direct inspection.
+- Never invent tool output.
 
 Use memory proactively. Call read_memory when past context, preferences, decisions, or project facts might help. Call append_memory whenever you learn a reusable fact, user preference, decision, workaround, or project detail that may be useful later; do not wait for the user to ask.
-
-Response formatting:
-- When the user asks for markdown, a table, code, JSON/YAML, a config snippet, a diff, logs, a stack trace, or any other structured artifact, output that artifact literally inside a fenced code block using triple backticks.
-- Do not emit raw markdown tables or raw multi-section markdown artifacts in the assistant message; wrap the entire artifact in one fenced code block so it is shown as quoted text instead of rendered markdown.
-- Normal explanatory prose can remain outside fences, but every requested artifact block must be fenced.
 
 Project command knowledge:
 - The Telegram gateway is managed with `uv run tomo telegram start`, `uv run tomo telegram stop`, and `uv run tomo telegram restart`.
@@ -77,6 +85,7 @@ DEFAULT_INTERRUPT_ON = {
     "terminal": {"allowed_decisions": ["approve", "reject"]},
     "write_file": {"allowed_decisions": ["approve", "reject"]},
     "edit_file": {"allowed_decisions": ["approve", "reject"]},
+    "schedule_task": {"allowed_decisions": ["approve", "reject"]},
 }
 
 
@@ -147,6 +156,7 @@ SKILL_SOURCES = [
     str(Path.home() / ".agents" / "skills"),
     str(Path.cwd() / ".deepagents" / "skills"),
     str(Path.cwd() / ".agents" / "skills"),
+    str(Path.cwd() / "skills")
 ]
 
 
@@ -177,9 +187,9 @@ def workspace_permissions() -> list[FilesystemPermission]:
     ]
 
 
-def make_agent():
+def make_agent(*, reasoning_effort: str | None = None):
     return create_deep_agent(
-        model=make_model(),
+        model=make_model(reasoning_effort=reasoning_effort),
         tools=[files_search, terminal, web_search, web_fetch, append_memory, read_memory],
         system_prompt=SYSTEM_PROMPT,
         skills=SKILL_SOURCES,

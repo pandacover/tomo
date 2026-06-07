@@ -50,7 +50,7 @@ def set_approval_handler(handler: ApprovalHandler | None) -> None:
 
 
 def get_tools():
-    return [files_search, terminal, web_search, web_fetch, append_memory, read_memory]
+    return [files_search, terminal, web_search, web_fetch, append_memory, read_memory, schedule_task]
 
 
 @tool("terminal")
@@ -81,6 +81,26 @@ def terminal(command: str) -> str:
     if len(output) > MAX_BASH_OUTPUT:
         output = output[:MAX_BASH_OUTPUT] + "\n... output truncated ..."
     return f"Exit code: {result.returncode}\n{output}" if output else f"Exit code: {result.returncode}"
+
+
+@tool("schedule_task")
+def schedule_task(command: str, delay: str = "5 minutes") -> str:
+    """Schedule a non-interactive bash command to run later using the local 'at' scheduler. delay examples: '5 minutes', '1 hour', 'now + 30 min'."""
+    try:
+        result = subprocess.run(
+            ["at", delay],
+            input=command + "\n",
+            cwd=_workspace(),
+            text=True,
+            capture_output=True,
+            timeout=30,
+        )
+        out = (result.stdout or "") + (result.stderr or "")
+        return f"Scheduled (exit {result.returncode}): {out.strip()}" if out.strip() else f"Scheduled (exit {result.returncode})"
+    except FileNotFoundError:
+        return "Error: 'at' command not found on this system."
+    except Exception as exc:  # noqa: BLE001
+        return f"Error scheduling task: {exc}"
 
 
 @tool("files_search")

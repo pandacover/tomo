@@ -15,6 +15,14 @@ from prompt_toolkit.widgets import Label, TextArea
 
 from .agent import SKILL_SOURCES, extract_text, make_agent
 from .config import settings
+from .reasoning import (
+    effective_reasoning_effort,
+    effective_show_reasoning_trace,
+    format_reasoning_status,
+    parse_reasoning_command_args,
+    reasoning_usage_message,
+    save_preferences,
+)
 from .gateway import ToolEventEmitter, approval_request_from_actions, extract_agent_trace, extract_interrupts, invoke_agent_streaming
 from .session_store import ChatSession, create_session, list_sessions, load_session, save_session
 from .slash_commands import SlashCommandCompleter, slash_prefix, status_hint, unrecognized_message
@@ -50,6 +58,8 @@ class PromptChat:
     session_choices: list[ChatSession] = field(default_factory=list)
     streaming_speaker: str | None = None
     debug_tool: bool = False
+    reasoning_effort: str = field(default_factory=effective_reasoning_effort)
+    show_reasoning_trace: bool | None = None
 
     def __post_init__(self) -> None:
         self.header = Label(self.header_text())
@@ -145,6 +155,9 @@ class PromptChat:
         if slash_prefix(text) == "/debug-tool":
             self.handle_debug_tool_command(text)
             return True
+        if slash_prefix(text) == "/reasoning":
+            self.handle_reasoning_command(text)
+            return True
         self.append_line("System", unrecognized_message(text, "chat"))
         return True
 
@@ -159,6 +172,27 @@ class PromptChat:
             self.append_line("System", "Tool debug output disabled.")
             return
         self.append_line("System", "Usage: /debug-tool enable or /debug-tool disable.")
+
+    def handle_reasoning_command(self, text: str) -> None:
+        action, value = parse_reasoning_command_args(command_argument(text))
+        if action == "status":
+            trace = effective_show_reasoning_trace(chat_override=self.show_reasoning_trace)
+            self.append_line("System", format_reasoning_status(effort=self.reasoning_effort, trace=trace))
+            return
+        if action == "effort" and value is not None:
+            self.reasoning_effort = value
+            save_preferences(reasoning_effort=value)
+            self.agent = make_agent(reasoning_effort=value)
+            self.header.text = self.header_text()
+            self.append_line("System", f"Reasoning effort set to {value}. Applies to subsequent messages.")
+            return
+        if action == "trace" and value is not None:
+            enabled = value == "on"
+            self.show_reasoning_trace = enabled
+            save_preferences(show_reasoning_summary=enabled)
+            self.append_line("System", f"Reasoning trace {'enabled' if enabled else 'disabled'}.")
+            return
+        self.append_line("System", reasoning_usage_message())
 
     def show_sessions(self) -> None:
         sessions = list_sessions()
@@ -224,7 +258,7 @@ class PromptChat:
         else:
             self.session.messages.append({"role": "assistant", "content": reply})
             save_session(self.session)
-            if settings.show_reasoning_summary and trace.reasoning_summary:
+            if effective_show_reasoning_trace(chat_override=self.show_reasoning_trace) and trace.reasoning_summary:
                 self.append_line("Trace", f"Reasoning summary: {trace.reasoning_summary}")
             if streamed_reply_parts:
                 self.streaming_speaker = None
@@ -383,7 +417,8 @@ def run_chat() -> None:
         return
     session = create_session()
     save_session(session)
-    chat = PromptChat(session=session, agent=make_agent())
+    effort = effective_reasoning_effort()
+    chat = PromptChat(session=session, agent=make_agent(reasoning_effort=effort), reasoning_effort=effort)
     chat.run()
 
 

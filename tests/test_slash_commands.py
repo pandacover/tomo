@@ -40,14 +40,16 @@ def test_unrecognized_message_includes_suggestion():
 def test_status_hint_lists_surface_commands():
     assert "/session" in status_hint("chat")
     assert "/debug-tool" in status_hint("chat")
+    assert "/reasoning" in status_hint("chat")
     assert "/approve" in status_hint("gateway")
+    assert "/reasoning" in status_hint("gateway")
     assert "/yolo" in status_hint("gateway")
     assert "/debug-tool" in status_hint("gateway")
 
 
 def test_telegram_bot_commands_match_gateway_surface():
     names = {item["command"] for item in telegram_bot_commands()}
-    assert names == {"start", "cancel", "approve", "deny", "yolo", "debug_tool"}
+    assert names == {"start", "cancel", "approve", "deny", "yolo", "debug_tool", "reasoning"}
 
 
 def test_slash_command_completer_offers_chat_commands():
