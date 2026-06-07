@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import os
 import queue
+import signal
+import subprocess
+import sys
 import threading
 import time
 from collections.abc import Iterable
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import httpx
 
@@ -23,6 +28,8 @@ TELEGRAM_TYPING_INTERVAL_SECONDS = 5
 TELEGRAM_STILL_WORKING_INTERVAL_SECONDS = 30
 YOLO_ENABLED_MESSAGE = "YOLO mode enabled for approval prompts. Dotfile deny rules still apply."
 YOLO_STATUS_ENABLED = "YOLO mode is enabled for approval prompts. Dotfile deny rules still apply."
+TELEGRAM_PID_FILENAME = "telegram.pid"
+TELEGRAM_LOG_FILENAME = "telegram.log"
 
 
 @dataclass
@@ -296,3 +303,95 @@ def run_telegram() -> None:
         config.bot_token,
         allowed_chat_ids=config.allowed_chat_ids,
     ).run()
+
+
+def start_telegram() -> None:
+    if load_tokens() is None:
+        print("Not logged in. Run `uv run tomo login` first.")
+        return
+    if resolved_telegram_config() is None:
+        print("Run `uv run tomo telegram-config set --bot-token TOKEN --chat-ids CHAT_ID` before starting the gateway.")
+        return
+
+    pid_path = telegram_pid_path()
+    existing_pid = read_pid(pid_path)
+    if existing_pid is not None and process_is_running(existing_pid):
+        print(f"Telegram gateway is already running with PID {existing_pid}.")
+        return
+    if existing_pid is not None:
+        pid_path.unlink(missing_ok=True)
+
+    settings.data_dir.mkdir(parents=True, exist_ok=True)
+    log_path = telegram_log_path()
+    log_file = log_path.open("ab")
+    process = subprocess.Popen(
+        [sys.executable, "-c", "from tomo.telegram import run_telegram; run_telegram()"],
+        stdin=subprocess.DEVNULL,
+        stdout=log_file,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+    )
+    log_file.close()
+    write_pid(pid_path, process.pid)
+    print(f"Telegram gateway started with PID {process.pid}.")
+    print(f"Logs: {log_path}")
+
+
+def stop_telegram() -> None:
+    pid_path = telegram_pid_path()
+    pid = read_pid(pid_path)
+    if pid is None:
+        print("Telegram gateway is not running.")
+        return
+    if not process_is_running(pid):
+        pid_path.unlink(missing_ok=True)
+        print("Telegram gateway was not running; removed stale PID file.")
+        return
+
+    os.kill(pid, signal.SIGTERM)
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        if not process_is_running(pid):
+            pid_path.unlink(missing_ok=True)
+            print("Telegram gateway stopped.")
+            return
+        time.sleep(0.1)
+
+    os.kill(pid, signal.SIGKILL)
+    pid_path.unlink(missing_ok=True)
+    print("Telegram gateway stopped forcefully.")
+
+
+def restart_telegram() -> None:
+    stop_telegram()
+    start_telegram()
+
+
+def telegram_pid_path() -> Path:
+    return settings.data_dir / TELEGRAM_PID_FILENAME
+
+
+def telegram_log_path() -> Path:
+    return settings.data_dir / TELEGRAM_LOG_FILENAME
+
+
+def read_pid(path: Path) -> int | None:
+    try:
+        return int(path.read_text(encoding="utf-8").strip())
+    except (FileNotFoundError, ValueError):
+        return None
+
+
+def write_pid(path: Path, pid: int) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"{pid}\n", encoding="utf-8")
+
+
+def process_is_running(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True

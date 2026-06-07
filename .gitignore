@@ -1,4 +1,6 @@
 .butler/
+.tomo/
+MEMORY.md
 sessions/
 .env
 .venv/

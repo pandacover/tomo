@@ -10,9 +10,15 @@ from tomo.telegram import (
     YOLO_ENABLED_MESSAGE,
     YOLO_STATUS_ENABLED,
     parse_allowed_chat_ids,
+    read_pid,
     split_message,
+    start_telegram,
+    stop_telegram,
     telegram_command,
     telegram_command_argument,
+    telegram_log_path,
+    telegram_pid_path,
+    write_pid,
 )
 from tomo.telegram_config import (
     TelegramConfig,
@@ -91,6 +97,69 @@ def test_telegram_gateway_ctrl_c_stops_without_traceback(capsys):
     gateway.run()
 
     assert gateway.fake_client.closed is True
+    assert "Telegram gateway stopped." in capsys.readouterr().out
+
+
+def test_start_telegram_spawns_background_gateway(tmp_path, monkeypatch, capsys):
+    popen_calls = []
+
+    class FakeProcess:
+        pid = 12345
+
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    monkeypatch.setattr("tomo.telegram.load_tokens", lambda: object())
+    monkeypatch.setattr(
+        "tomo.telegram.resolved_telegram_config",
+        lambda: TelegramConfig(bot_token="token", allowed_chat_ids=[1]),
+    )
+    monkeypatch.setattr("tomo.telegram.process_is_running", lambda pid: False)
+    monkeypatch.setattr(
+        "tomo.telegram.subprocess.Popen",
+        lambda *args, **kwargs: popen_calls.append((args, kwargs)) or FakeProcess(),
+    )
+
+    start_telegram()
+
+    assert read_pid(telegram_pid_path()) == 12345
+    assert telegram_log_path() == tmp_path / "telegram.log"
+    assert popen_calls[0][0][0][-2:] == ["-c", "from tomo.telegram import run_telegram; run_telegram()"]
+    assert popen_calls[0][1]["start_new_session"] is True
+    assert "Telegram gateway started with PID 12345." in capsys.readouterr().out
+
+
+def test_start_telegram_refuses_when_gateway_is_already_running(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    monkeypatch.setattr("tomo.telegram.load_tokens", lambda: object())
+    monkeypatch.setattr(
+        "tomo.telegram.resolved_telegram_config",
+        lambda: TelegramConfig(bot_token="token", allowed_chat_ids=[]),
+    )
+    monkeypatch.setattr("tomo.telegram.process_is_running", lambda pid: True)
+    write_pid(telegram_pid_path(), 12345)
+
+    start_telegram()
+
+    assert "already running with PID 12345" in capsys.readouterr().out
+
+
+def test_stop_telegram_terminates_running_gateway(tmp_path, monkeypatch, capsys):
+    killed = []
+    running = {12345}
+
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    monkeypatch.setattr("tomo.telegram.process_is_running", lambda pid: pid in running)
+
+    def fake_kill(pid: int, sig: int) -> None:
+        killed.append((pid, sig))
+        running.discard(pid)
+
+    monkeypatch.setattr("tomo.telegram.os.kill", fake_kill)
+    write_pid(telegram_pid_path(), 12345)
+
+    stop_telegram()
+
+    assert killed == [(12345, 15)]
+    assert not telegram_pid_path().exists()
     assert "Telegram gateway stopped." in capsys.readouterr().out
 
 

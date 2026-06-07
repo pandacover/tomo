@@ -12,7 +12,7 @@ from .telegram_config import (
     save_telegram_config,
 )
 from .token_store import delete_tokens, load_tokens
-from .telegram import run_telegram
+from .telegram import restart_telegram, start_telegram, stop_telegram
 from .tui import run_chat
 
 
@@ -23,7 +23,11 @@ def main() -> None:
     subparsers.add_parser("logout", help="Delete local OAuth tokens")
     subparsers.add_parser("auth-status", help="Show local auth status")
     subparsers.add_parser("chat", help="Launch the prompt_toolkit chat UI")
-    subparsers.add_parser("telegram", help="Run the Telegram chat gateway")
+    telegram_parser = subparsers.add_parser("telegram", help="Manage the Telegram chat gateway")
+    telegram_subparsers = telegram_parser.add_subparsers(dest="telegram_command")
+    telegram_subparsers.add_parser("start", help="Start the Telegram gateway in the background")
+    telegram_subparsers.add_parser("stop", help="Stop the background Telegram gateway")
+    telegram_subparsers.add_parser("restart", help="Restart the background Telegram gateway")
     telegram_config_parser = subparsers.add_parser("telegram-config", help="Manage saved Telegram gateway config")
     telegram_config_subparsers = telegram_config_parser.add_subparsers(dest="telegram_config_command")
     telegram_config_set = telegram_config_subparsers.add_parser("set", help="Add or update Telegram gateway config")
@@ -49,7 +53,7 @@ def main() -> None:
         case "chat":
             run_chat()
         case "telegram":
-            run_telegram()
+            telegram(args)
         case "telegram-config":
             telegram_config(args)
         case _:
@@ -91,6 +95,18 @@ def telegram_config(args: argparse.Namespace) -> None:
             print("Telegram config deleted.")
         case _:
             print("Choose a telegram-config command: set, show, or delete.")
+
+
+def telegram(args: argparse.Namespace) -> None:
+    match args.telegram_command:
+        case "start":
+            start_telegram()
+        case "stop":
+            stop_telegram()
+        case "restart":
+            restart_telegram()
+        case _:
+            print("Choose a telegram command: start, stop, or restart.")
 
 
 if __name__ == "__main__":

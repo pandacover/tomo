@@ -9,6 +9,7 @@ from langchain.agents.middleware import TodoListMiddleware
 from tomo.agent import (
     DEFAULT_INTERRUPT_ON,
     EXCLUDED_BUILTIN_TOOLS,
+    SYSTEM_PROMPT,
     TOOL_DESCRIPTION_OVERRIDES,
     TomoTodoListMiddleware,
     SKILLS_LOGGER,
@@ -57,6 +58,20 @@ def test_tomo_todo_middleware_keeps_planning_but_requires_validation():
     assert "does not read, write, or edit project files" in middleware.tool_description
     assert "after suitable validation passed" in middleware.tool_description
     assert "fully finished and validated" in middleware.system_prompt
+
+
+def test_system_prompt_requires_fenced_markdown_artifacts():
+    assert "output that artifact literally inside a fenced code block" in SYSTEM_PROMPT
+    assert "Do not emit raw markdown tables" in SYSTEM_PROMPT
+    assert "wrap the entire artifact in one fenced code block" in SYSTEM_PROMPT
+
+
+def test_system_prompt_documents_telegram_lifecycle_commands():
+    assert "`uv run tomo telegram start`" in SYSTEM_PROMPT
+    assert "`uv run tomo telegram stop`" in SYSTEM_PROMPT
+    assert "`uv run tomo telegram restart`" in SYSTEM_PROMPT
+    assert "`.tomo/telegram.pid`" in SYSTEM_PROMPT
+    assert "`.tomo/telegram.log`" in SYSTEM_PROMPT
 
 
 def test_agent_overrides_remaining_builtin_tool_descriptions():
