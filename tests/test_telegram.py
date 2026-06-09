@@ -9,6 +9,7 @@ from tomo.telegram import (
     TelegramGateway,
     YOLO_ENABLED_MESSAGE,
     YOLO_STATUS_ENABLED,
+    decode_data_url,
     parse_allowed_chat_ids,
     read_pid,
     split_message,
@@ -27,11 +28,13 @@ from tomo.telegram_config import (
     resolved_telegram_config,
     save_telegram_config,
 )
+from tomo.session_store import ChatSession, create_session, list_sessions, load_session, save_session
 
 
 class FakeTomo:
     def __init__(self) -> None:
-        self.messages: list[tuple[str, str]] = []
+        self.messages: list[tuple[str, object]] = []
+        self.sessions: dict[str, ChatSession] = {}
 
     def send_text_with_events(self, channel_id: str, text: str, on_event=None, on_text_delta=None) -> GatewayReply:
         self.messages.append((channel_id, text))
@@ -44,6 +47,18 @@ class FakeTomo:
             text="streamed reply",
             trace=AgentTrace(reasoning_summary="hidden by default"),
         )
+
+    def send_user_content_with_events(self, channel_id: str, content: object, on_event=None, on_text_delta=None) -> GatewayReply:
+        self.messages.append((channel_id, content))
+        return GatewayReply(text="image reply", trace=AgentTrace())
+
+    def list_channel_sessions(self, channel_id: str) -> list[ChatSession]:
+        return list_sessions()
+
+    def set_channel_session(self, channel_id: str, session_id: str) -> ChatSession:
+        session = load_session(session_id)
+        self.sessions[channel_id] = session
+        return session
 
 
 class FakeTelegram(TelegramGateway):
@@ -65,6 +80,11 @@ class FakeTelegram(TelegramGateway):
             self.sent.append((str(payload["chat_id"]), str(payload["text"])))
             return {"ok": True, "result": True}
         return {"ok": True, "result": []}
+
+
+class ImageTelegram(FakeTelegram):
+    def telegram_image_data_url(self, file_id: str) -> str:
+        return f"data:image/jpeg;base64,{file_id}"
 
 
 class ClosableClient:
@@ -228,10 +248,107 @@ def test_telegram_gateway_routes_text_to_tomo():
 
     assert tomo.messages == [("123", "hello")]
     assert [(method, payload["text"]) for method, payload in gateway.calls] == [
-        ("sendMessage", 'web_search: "{"query":"hello"}"'),
+        ("sendMessage", 'Tool calls (1)\n• web_search("{"query":"hello"}")'),
         ("sendMessage", "streamed reply"),
     ]
     assert all("link_preview_options" not in payload for _, payload in gateway.calls)
+
+
+def test_telegram_gateway_routes_photo_to_tomo():
+    tomo = FakeTomo()
+    gateway = ImageTelegram(tomo=tomo)
+
+    gateway.handle_update(
+        {
+            "message": {
+                "chat": {"id": 123},
+                "caption": "what is in this image?",
+                "photo": [
+                    {"file_id": "small", "width": 100, "file_size": 10},
+                    {"file_id": "large", "width": 1000, "file_size": 100},
+                ],
+            }
+        }
+    )
+    deadline = time.monotonic() + 1
+    while not tomo.messages and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    assert tomo.messages == [
+        (
+            "123",
+            [
+                {"type": "text", "text": "what is in this image?"},
+                {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,large"}},
+            ],
+        )
+    ]
+    assert gateway.sent == [("123", "image reply")]
+
+
+def test_telegram_gateway_session_command_lists_saved_sessions(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    session = create_session("Project A")
+    save_session(session)
+    gateway = FakeTelegram()
+
+    gateway.handle_text("123", "/session")
+
+    assert "123" in gateway.pending_session_choices
+    assert gateway.sent == [
+        (
+            "123",
+            f"Saved sessions:\n1. Project A - {session.metadata.updated_date} - {session.metadata.id[:8]}\n"
+            "Reply with a session number to load it, or /cancel.",
+        )
+    ]
+
+
+def test_telegram_gateway_session_selection_switches_chat_session(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    first = create_session("First")
+    first.messages.append({"role": "user", "content": "first"})
+    save_session(first)
+    second = create_session("Second")
+    second.messages.append({"role": "user", "content": "second"})
+    save_session(second)
+    gateway = FakeTelegram()
+
+    gateway.handle_text("123", "/session")
+    selected = gateway.pending_session_choices["123"][0]
+    gateway.handle_text("123", "1")
+
+    assert gateway.tomo.sessions["123"].metadata.id == selected.metadata.id
+    assert "123" not in gateway.pending_session_choices
+    assert gateway.sent[-1] == ("123", f"Loaded session: {selected.metadata.name} - {selected.metadata.id[:8]}")
+
+
+def test_telegram_gateway_session_selection_validates_reply(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    save_session(create_session("Project A"))
+    gateway = FakeTelegram()
+
+    gateway.handle_text("123", "/session")
+    gateway.handle_text("123", "bogus")
+    gateway.handle_text("123", "99")
+
+    assert gateway.sent[-2:] == [
+        ("123", "Reply with a session number, or /cancel."),
+        ("123", "Choose a number from 1 to 1, or /cancel."),
+    ]
+    assert "123" in gateway.pending_session_choices
+
+
+def test_telegram_gateway_session_selection_can_be_cancelled(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    save_session(create_session("Project A"))
+    gateway = FakeTelegram()
+
+    gateway.handle_text("123", "/session")
+    gateway.handle_text("123", "/cancel")
+
+    assert "123" not in gateway.pending_session_choices
+    assert gateway.sent[-1] == ("123", "Session selection cancelled.")
 
 
 class EmptyReplyTomo:
@@ -244,11 +361,31 @@ class ToolErrorTomo:
         return GatewayReply(text="done", trace=AgentTrace(tool_errors=("terminal: Error: command failed",)))
 
 
+class ReasoningTomo:
+    channel_trace_override = {"123": True}
+
+    def send_text_with_events(self, channel_id: str, text: str, on_event=None, on_text_delta=None) -> GatewayReply:
+        return GatewayReply(text="done", trace=AgentTrace(reasoning_summary="Inspecting code\nChecking tests"))
+
+
 class LongToolTomo:
     def send_text_with_events(self, channel_id: str, text: str, on_event=None, on_text_delta=None) -> GatewayReply:
         if on_event is not None:
             on_event(ToolCallLifecycleEvent(name="terminal", input={"command": "x" * 80}))
         return GatewayReply(text="done", trace=AgentTrace())
+
+
+class MultiToolTomo:
+    def send_text_with_events(self, channel_id: str, text: str, on_event=None, on_text_delta=None) -> GatewayReply:
+        if on_event is not None:
+            on_event(ToolCallLifecycleEvent(name="files_search", input={"query": "telegram"}))
+            on_event(ToolCallLifecycleEvent(name="read_file", input={"path": "src/tomo/telegram.py"}))
+        return GatewayReply(text="done", trace=AgentTrace())
+
+
+class PhotoReplyTomo:
+    def send_text_with_events(self, channel_id: str, text: str, on_event=None, on_text_delta=None) -> GatewayReply:
+        return GatewayReply(text="done", trace=AgentTrace(), images=("https://example.com/image.png",))
 
 
 def test_telegram_gateway_does_not_send_empty_reply():
@@ -265,9 +402,53 @@ def test_telegram_gateway_surfaces_tool_errors_before_final_reply():
     gateway.reply_worker("123", "hello")
 
     assert gateway.sent == [
-        ("123", "Tool error: terminal: Error: command failed"),
+        ("123", "Tool errors (1)\n• terminal: Error: command failed"),
         ("123", "done"),
     ]
+
+
+def test_telegram_gateway_surfaces_reasoning_trace_as_tree_before_final_reply():
+    gateway = FakeTelegram(tomo=ReasoningTomo())
+
+    gateway.reply_worker("123", "hello")
+
+    assert gateway.sent == [
+        ("123", "Thinking\nInspecting code\nChecking tests"),
+        ("123", "done"),
+    ]
+
+
+def test_telegram_gateway_groups_consecutive_tool_calls_by_editing_same_message():
+    gateway = FakeTelegram(tomo=MultiToolTomo())
+
+    gateway.reply_worker("123", "hello")
+
+    assert [(method, payload["text"]) for method, payload in gateway.calls] == [
+        ("sendMessage", 'Tool calls (1)\n• files_search("{"query":"telegram"}")'),
+        (
+            "editMessageText",
+            'Tool calls (2)\n'
+            '• files_search("{"query":"telegram"}")\n'
+            '• read_file("{"path":"src/tomo/telegram.py"}")',
+        ),
+        ("sendMessage", "done"),
+    ]
+
+
+def test_telegram_gateway_sends_reply_images_as_photos():
+    gateway = FakeTelegram(tomo=PhotoReplyTomo())
+
+    gateway.reply_worker("123", "draw")
+
+    assert ("sendPhoto", {"chat_id": "123", "photo": "https://example.com/image.png"}) in gateway.calls
+    assert ("123", "done") in gateway.sent
+
+
+def test_decode_data_url_reads_media_type_and_bytes():
+    media_type, data = decode_data_url("data:image/png;base64,aGk=")
+
+    assert media_type == "image/png"
+    assert data == b"hi"
 
 
 class SlowTomo:
@@ -365,9 +546,9 @@ def test_telegram_gateway_debug_tool_toggle_controls_tool_event_truncation():
     gateway.reply_worker("123", "run")
     full_tool_message = gateway.sent[-2][1]
 
-    assert truncated_tool_message.endswith('..."')
+    assert truncated_tool_message.endswith('...")')
     assert len(full_tool_message) > len(truncated_tool_message)
-    assert full_tool_message == 'terminal: "{"command":"' + ("x" * 80) + '"}"'
+    assert full_tool_message == 'Tool calls (1)\n• terminal("{"command":"' + ("x" * 80) + '"}")'
     assert ("123", "Tool debug output enabled.") in gateway.sent
 
     gateway.handle_text("123", "/debug-tool disable")

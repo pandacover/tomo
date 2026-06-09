@@ -48,6 +48,7 @@ def test_project_tools_include_primitive_file_tools_and_search():
         "browser",
         "web_search",
         "web_fetch",
+        "generate_image",
         "append_memory",
         "read_memory",
         "schedule_task",

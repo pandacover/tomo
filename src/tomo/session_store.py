@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass, field
+from typing import Any
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
@@ -21,7 +22,7 @@ class SessionMetadata:
 @dataclass
 class ChatSession:
     metadata: SessionMetadata
-    messages: list[dict[str, str]] = field(default_factory=list)
+    messages: list[dict[str, Any]] = field(default_factory=list)
 
 
 def now_iso() -> str:
@@ -91,17 +92,17 @@ def _parse_session(data: dict[str, object]) -> ChatSession:
     )
 
 
-def _parse_message(message: object) -> dict[str, str]:
+def _parse_message(message: object) -> dict[str, Any]:
     if not isinstance(message, dict):
         raise ValueError("Session message must be an object")
     role = str(message["role"])
-    content = str(message["content"])
+    content = message["content"]
     return {"role": role, "content": content}
 
 
-def _message_to_json(message: object) -> dict[str, str]:
+def _message_to_json(message: object) -> dict[str, Any]:
     if isinstance(message, dict):
-        return {"role": str(message["role"]), "content": str(message["content"])}
+        return {"role": str(message["role"]), "content": message["content"]}
 
     message_type = getattr(message, "type", None)
     role = "assistant" if message_type == "ai" else "user" if message_type == "human" else str(message_type or "assistant")

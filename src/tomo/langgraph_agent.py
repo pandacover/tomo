@@ -17,7 +17,7 @@ from .browser_tools import browser
 from .file_tools import edit_file, glob, read_file, write_file
 from .gateway import extract_tool_errors, get_message_tool_content, get_message_tool_name, get_tool_calls, rectification_prompt, unresolved_failure_reply
 from .model import make_model
-from .tools import append_memory, files_search, read_memory, terminal, web_fetch, web_search
+from .tools import append_memory, files_search, generate_image, read_memory, terminal, web_fetch, web_search
 
 
 class TomoGraphState(TypedDict):
@@ -60,6 +60,8 @@ def make_langgraph_agent(*, reasoning_effort: str | None = None, model: object |
             required.add("local_files")
         if has_any_word(lowered, ("current", "latest", "today", "news", "docs", "documentation", "version", "api", "web", "search")):
             required.add("web")
+        if has_any_word(lowered, ("image", "photo", "picture", "illustration", "draw", "render", "generate")):
+            required.add("image_generation")
         if has_any_word(lowered, ("remember", "preference", "memory", "previous", "past", "decision", "recurring")):
             required.add("memory")
         if not required:
@@ -236,7 +238,20 @@ def make_langgraph_agent(*, reasoning_effort: str | None = None, model: object |
 
 
 def default_langgraph_tools() -> list[BaseTool]:
-    return [files_search, read_file, glob, terminal, browser, web_search, web_fetch, append_memory, read_memory, write_file, edit_file]
+    return [
+        files_search,
+        read_file,
+        glob,
+        terminal,
+        browser,
+        web_search,
+        web_fetch,
+        generate_image,
+        append_memory,
+        read_memory,
+        write_file,
+        edit_file,
+    ]
 
 
 def after_model(state: TomoGraphState) -> str:

@@ -29,6 +29,7 @@ WEB_SEARCH_CHUNK_SIZE = 1_500
 WEB_SEARCH_MAX_CHUNKS = 8
 DUCKDUCKGO_HTML_URL = "https://html.duckduckgo.com/html/"
 WEB_USER_AGENT = "Tomo/0.1 (+https://example.invalid/tomo)"
+XAI_IMAGE_MODEL = "grok-imagine-image-quality"
 
 
 class ApprovalRequired(RuntimeError):
@@ -52,7 +53,40 @@ def set_approval_handler(handler: ApprovalHandler | None) -> None:
 
 
 def get_tools():
-    return [files_search, terminal, browser, web_search, web_fetch, append_memory, read_memory, schedule_task]
+    return [files_search, terminal, browser, web_search, web_fetch, generate_image, append_memory, read_memory, schedule_task]
+
+
+@tool("generate_image")
+def generate_image(prompt: str) -> str:
+    """Generate an image from a text prompt.
+
+    Use this when the user asks to create, draw, render, make, or generate an image/photo/illustration.
+    The result includes an IMAGE_URL marker; preserve that exact marker in the final answer so gateways can send the image.
+    """
+    from .oauth import XAI_API_BASE_URL, get_valid_tokens
+
+    tokens = get_valid_tokens()
+    response = httpx.post(
+        f"{XAI_API_BASE_URL}/images/generations",
+        headers={
+            "Authorization": f"Bearer {tokens.access_token}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "model": XAI_IMAGE_MODEL,
+            "prompt": prompt,
+        },
+        timeout=120,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    data = payload.get("data")
+    if not isinstance(data, list) or not data:
+        return f"Error: image generation response did not include data: {payload}"
+    first = data[0]
+    if not isinstance(first, dict) or not isinstance(first.get("url"), str):
+        return f"Error: image generation response did not include a URL: {payload}"
+    return f"IMAGE_URL: {first['url']}"
 
 
 @tool("terminal")

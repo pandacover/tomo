@@ -68,6 +68,12 @@ def fake_web_fetch(url: str) -> str:
     return "fetch ok"
 
 
+@tool("generate_image")
+def fake_generate_image(prompt: str) -> str:
+    """Fake image generation."""
+    return "IMAGE_URL: https://example.com/generated.png"
+
+
 @tool("terminal")
 def fake_terminal(command: str) -> str:
     """Fake terminal."""
@@ -134,6 +140,22 @@ def test_simple_stable_question_skips_tools():
 
     assert [getattr(message, "name", None) for message in result["messages"] if getattr(message, "type", None) == "tool"] == []
     assert result["messages"][-1].content == "Paris"
+
+
+def test_image_request_uses_generate_image_tool():
+    model = FakeModel(
+        [
+            AIMessage(content="", tool_calls=[{"id": "call-1", "name": "generate_image", "args": {"prompt": "a robot"}}]),
+            AIMessage(content="IMAGE_URL: https://example.com/generated.png"),
+        ]
+    )
+    agent = make_langgraph_agent(model=model, tools=[fake_generate_image])
+
+    result = agent.invoke({"messages": [HumanMessage(content="draw a robot")]}, config=config())
+
+    tool_names = [getattr(message, "name", None) for message in result["messages"]]
+    assert "generate_image" in tool_names
+    assert result["messages"][-1].content == "IMAGE_URL: https://example.com/generated.png"
 
 
 def test_invalid_grep_tool_call_routes_back_to_model_correction():

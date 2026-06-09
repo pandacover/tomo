@@ -55,6 +55,66 @@ def test_tomo_gateway_sends_message_and_saves_reply(tmp_path, monkeypatch):
     ]
 
 
+def test_tomo_gateway_sends_image_content_and_saves_structured_message(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    calls = []
+    agent = SimpleNamespace(
+        invoke=lambda payload, **kwargs: calls.append(payload) or {"messages": [{"role": "assistant", "content": "seen"}]}
+    )
+    gateway = TomoGateway(responder=Responder(), agent=agent)
+    content = [
+        {"type": "text", "text": "what is this?"},
+        {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,abc"}},
+    ]
+
+    reply = gateway.send_user_content_with_events("chat-1", content)
+
+    assert reply.text == "seen"
+    assert gateway.sessions["chat-1"].messages == [
+        {"role": "user", "content": content},
+        {"role": "assistant", "content": "seen"},
+    ]
+    assert calls[0]["messages"][-1]["content"] == content
+
+
+def test_tomo_gateway_extracts_assistant_image_blocks(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    agent = SimpleNamespace(
+        invoke=lambda *args, **kwargs: {
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": "here"},
+                        {"type": "image_url", "image_url": {"url": "https://example.com/image.png"}},
+                    ],
+                }
+            ]
+        }
+    )
+    gateway = TomoGateway(responder=Responder(), agent=agent)
+
+    reply = gateway.send_text_with_events("chat-1", "make an image")
+
+    assert reply.text == "here"
+    assert reply.images == ("https://example.com/image.png",)
+
+
+def test_tomo_gateway_extracts_image_url_markers_from_text(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    agent = SimpleNamespace(
+        invoke=lambda *args, **kwargs: {
+            "messages": [{"role": "assistant", "content": "Here you go.\nIMAGE_URL: https://example.com/image.png"}]
+        }
+    )
+    gateway = TomoGateway(responder=Responder(), agent=agent)
+
+    reply = gateway.send_text_with_events("chat-1", "draw")
+
+    assert reply.text == "Here you go."
+    assert reply.images == ("https://example.com/image.png",)
+
+
 def test_tomo_gateway_resumes_interrupt_with_approval(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     responder = Responder(approved=True)

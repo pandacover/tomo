@@ -42,6 +42,7 @@ def test_status_hint_lists_surface_commands():
     assert "/debug-tool" in status_hint("chat")
     assert "/reasoning" in status_hint("chat")
     assert "/orchestrator" not in status_hint("chat")
+    assert "/session" in status_hint("gateway")
     assert "/approve" in status_hint("gateway")
     assert "/reasoning" in status_hint("gateway")
     assert "/orchestrator" not in status_hint("gateway")
@@ -51,7 +52,7 @@ def test_status_hint_lists_surface_commands():
 
 def test_telegram_bot_commands_match_gateway_surface():
     names = {item["command"] for item in telegram_bot_commands()}
-    assert names == {"start", "cancel", "approve", "deny", "yolo", "debug_tool", "reasoning"}
+    assert names == {"start", "session", "cancel", "approve", "deny", "yolo", "debug_tool", "reasoning"}
 
 
 def test_slash_command_completer_offers_chat_commands():

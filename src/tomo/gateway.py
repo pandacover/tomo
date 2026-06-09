@@ -5,13 +5,13 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 import re
-from typing import Callable, Protocol
+from typing import Any, Callable, Protocol
 
 from langgraph.types import Command
 
 from .agent import SKILL_SOURCES, extract_text, make_agent
 from .reasoning import effective_reasoning_effort
-from .session_store import ChatSession, create_session, save_session
+from .session_store import ChatSession, create_session, list_sessions, load_session, save_session
 from .tools import ApprovalRequest
 
 
@@ -51,11 +51,13 @@ class AgentTrace:
 class GatewayReply:
     text: str
     trace: AgentTrace
+    images: tuple[str, ...] = ()
 
 
 TraceEventHandler = Callable[[ToolCallLifecycleEvent], None]
 TextDeltaHandler = Callable[[str], None]
 MAX_RECTIFICATION_ATTEMPTS = 2
+UserContent = str | list[dict[str, Any]]
 
 
 def format_tool_input(value: object, *, limit: int | None = 50) -> str:
@@ -108,6 +110,18 @@ class TomoGateway:
             self.sessions[channel_id] = session
         return session
 
+    def list_channel_sessions(self, channel_id: str) -> list[ChatSession]:
+        current = self.get_session(channel_id)
+        sessions = list_sessions()
+        if any(session.metadata.id == current.metadata.id for session in sessions):
+            return sessions
+        return [current, *sessions]
+
+    def set_channel_session(self, channel_id: str, session_id: str) -> ChatSession:
+        session = load_session(session_id)
+        self.sessions[channel_id] = session
+        return session
+
     def send_text(self, channel_id: str, text: str) -> str:
         return self.send_text_with_trace(channel_id, text).text
 
@@ -121,12 +135,26 @@ class TomoGateway:
         on_event: TraceEventHandler | None = None,
         on_text_delta: TextDeltaHandler | None = None,
     ) -> GatewayReply:
+        return self.send_user_content_with_events(
+            channel_id,
+            text,
+            on_event=on_event,
+            on_text_delta=on_text_delta,
+        )
+
+    def send_user_content_with_events(
+        self,
+        channel_id: str,
+        content: UserContent,
+        on_event: TraceEventHandler | None = None,
+        on_text_delta: TextDeltaHandler | None = None,
+    ) -> GatewayReply:
         session = self.get_session(channel_id)
-        session.messages.append({"role": "user", "content": text})
+        session.messages.append({"role": "user", "content": content})
         save_session(session)
 
         messages = [dict(message) for message in session.messages]
-        messages[-1]["content"] = add_skill_context(text)
+        messages[-1]["content"] = add_skill_context_to_user_content(content)
         result = self.invoke_agent_with_approvals(
             channel_id,
             session,
@@ -162,12 +190,12 @@ class TomoGateway:
                 ]
             }
 
-        reply = extract_text(result)
+        reply, images = extract_reply_content(result)
         trace = extract_agent_trace(result)
 
         session.messages.append({"role": "assistant", "content": reply})
         save_session(session)
-        return GatewayReply(text=reply, trace=trace)
+        return GatewayReply(text=reply, trace=trace, images=images)
 
     def invoke_agent_with_approvals(
         self,
@@ -226,6 +254,73 @@ def add_skill_context(text: str) -> str:
         return text
     blocks = [f'<skill_context name="{name}" path="{path}">\n{content}\n</skill_context>' for name, path, content in skills]
     return "\n\n".join([*blocks, f"User prompt:\n{text}"])
+
+
+def extract_reply_content(result: object) -> tuple[str, tuple[str, ...]]:
+    content = latest_assistant_content(result)
+    if isinstance(content, list):
+        text_parts: list[str] = []
+        images: list[str] = []
+        for part in content:
+            if not isinstance(part, Mapping):
+                continue
+            if part.get("type") == "text" and isinstance(part.get("text"), str):
+                text_parts.append(part["text"])
+            image_url = part.get("image_url")
+            if isinstance(image_url, str):
+                images.append(image_url)
+            elif isinstance(image_url, Mapping) and isinstance(image_url.get("url"), str):
+                images.append(image_url["url"])
+        return "\n".join(text_parts), tuple(images)
+    text = extract_text(result)
+    return extract_image_markers(text)
+
+
+def extract_image_markers(text: str) -> tuple[str, tuple[str, ...]]:
+    images: list[str] = []
+    text_lines: list[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("IMAGE_URL:"):
+            url = stripped.removeprefix("IMAGE_URL:").strip()
+            if url:
+                images.append(url)
+            continue
+        text_lines.append(line)
+    return "\n".join(text_lines).strip(), tuple(images)
+
+
+def latest_assistant_content(result: object) -> object | None:
+    if hasattr(result, "value"):
+        result = result.value
+    if isinstance(result, Mapping):
+        messages = result.get("messages")
+        if isinstance(messages, list):
+            for message in reversed(messages):
+                role = message.get("role") if isinstance(message, Mapping) else getattr(message, "role", None)
+                message_type = message.get("type") if isinstance(message, Mapping) else getattr(message, "type", None)
+                if role not in {None, "assistant", "ai"} and message_type not in {None, "ai", "assistant"}:
+                    continue
+                return message.get("content") if isinstance(message, Mapping) else getattr(message, "content", None)
+    return getattr(result, "content", None)
+
+
+def add_skill_context_to_user_content(content: UserContent) -> UserContent:
+    if isinstance(content, str):
+        return add_skill_context(content)
+
+    text_parts = [part.get("text", "") for part in content if part.get("type") == "text" and isinstance(part.get("text"), str)]
+    text = "\n".join(text_parts)
+    contextualized_text = add_skill_context(text)
+    if contextualized_text == text:
+        return content
+
+    updated = [dict(part) for part in content]
+    for part in updated:
+        if part.get("type") == "text":
+            part["text"] = contextualized_text
+            return updated
+    return [{"type": "text", "text": contextualized_text}, *updated]
 
 
 def resolve_skill_references(text: str) -> list[tuple[str, str, str]]:

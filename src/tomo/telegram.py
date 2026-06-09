@@ -7,6 +7,7 @@ import subprocess
 import sys
 import threading
 import time
+from base64 import b64decode, b64encode
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -14,7 +15,7 @@ from pathlib import Path
 import httpx
 
 from .config import settings
-from .gateway import TomoGateway
+from .gateway import ToolCallLifecycleEvent, TomoGateway, UserContent, format_tool_input
 from .reasoning import (
     effective_reasoning_effort,
     effective_show_reasoning_trace,
@@ -23,6 +24,7 @@ from .reasoning import (
     reasoning_usage_message,
 )
 from .slash_commands import slash_prefix, telegram_bot_commands, unrecognized_message
+from .session_store import ChatSession
 from .telegram_config import parse_allowed_chat_ids, resolved_telegram_config
 from .token_store import load_tokens
 from .tools import ApprovalRequest
@@ -45,6 +47,33 @@ class PendingTelegramApproval:
     answers: queue.Queue[bool] = field(default_factory=queue.Queue)
 
 
+@dataclass
+class TelegramTraceBlock:
+    chat_id: str
+    gateway: TelegramGateway
+    full_tool_input: bool = False
+    tool_events: list[ToolCallLifecycleEvent] = field(default_factory=list)
+    message_id: int | None = None
+
+    def add_tool_event(self, event: ToolCallLifecycleEvent) -> None:
+        self.tool_events.append(event)
+        self.publish_tool_block()
+
+    def publish_tool_block(self) -> None:
+        text = fit_editable_message(render_tool_events_tree(self.tool_events, full_input=self.full_tool_input))
+        if self.message_id is None:
+            self.message_id = self.gateway.send_message_blob(self.chat_id, text)
+            return
+        self.gateway.edit_message_blob(self.chat_id, self.message_id, text)
+
+    def send_reasoning(self, summary: str) -> None:
+        self.gateway.send_message(self.chat_id, render_reasoning_tree(summary))
+
+    def send_tool_errors(self, errors: tuple[str, ...]) -> None:
+        if errors:
+            self.gateway.send_message(self.chat_id, render_tool_errors_tree(errors))
+
+
 class TelegramGateway:
     def __init__(
         self,
@@ -60,6 +89,7 @@ class TelegramGateway:
         self.api_url = f"https://api.telegram.org/bot{token}"
         self.tomo = tomo or TomoGateway(responder=self)
         self.pending_approvals: dict[str, PendingTelegramApproval] = {}
+        self.pending_session_choices: dict[str, list[ChatSession]] = {}
         self.busy_chats: set[str] = set()
         self.yolo_chats: set[str] = set()
         self.debug_tool_chats: set[str] = set()
@@ -103,10 +133,32 @@ class TelegramGateway:
         if self.allowed_chat_ids and int(chat_id) not in self.allowed_chat_ids:
             self.send_message(chat_id, "This chat is not allowed to use Tomo.")
             return
-        text = str(message.get("text") or "").strip()
-        if not text:
+        content = self.extract_message_content(message)
+        if content is None:
             return
-        self.handle_text(chat_id, text)
+        if isinstance(content, str):
+            self.handle_text(chat_id, content)
+            return
+        self.handle_user_content(chat_id, content)
+
+    def extract_message_content(self, message: dict[str, object]) -> UserContent | None:
+        text = str(message.get("text") or "").strip()
+        if text:
+            return text
+
+        photos = message.get("photo")
+        if not isinstance(photos, list) or not photos:
+            return None
+        caption = str(message.get("caption") or "").strip() or "Describe this image."
+        photo = largest_telegram_photo(photos)
+        file_id = photo.get("file_id") if photo is not None else None
+        if not isinstance(file_id, str):
+            return None
+        image_url = self.telegram_image_data_url(file_id)
+        return [
+            {"type": "text", "text": caption},
+            {"type": "image_url", "image_url": {"url": image_url}},
+        ]
 
     def handle_text(self, chat_id: str, text: str) -> None:
         command = telegram_command(text)
@@ -119,14 +171,22 @@ class TelegramGateway:
         if command == "/reasoning":
             self.handle_reasoning_command(chat_id, text)
             return
+        if command == "/session":
+            self.handle_session_command(chat_id)
+            return
         pending = self.pending_approvals.get(chat_id)
         if pending is not None:
             self.resolve_approval(chat_id, command or text, pending)
+            return
+        if chat_id in self.pending_session_choices:
+            self.resolve_session_selection(chat_id, text)
             return
         if command == "/start":
             self.send_message(chat_id, "Tomo is ready. Send a message to chat.")
             return
         if command == "/cancel":
+            if self.cancel_session_selection(chat_id):
+                return
             self.send_message(chat_id, "No pending approval to cancel.")
             return
         if command in {"/approve", "/deny"}:
@@ -143,16 +203,35 @@ class TelegramGateway:
         thread = threading.Thread(target=self.reply_worker, args=(chat_id, text), daemon=True)
         thread.start()
 
-    def reply_worker(self, chat_id: str, text: str) -> None:
+    def handle_user_content(self, chat_id: str, content: UserContent) -> None:
+        if chat_id in self.pending_approvals:
+            self.send_message(chat_id, "Reply /approve or /deny.")
+            return
+        if chat_id in self.pending_session_choices:
+            self.send_message(chat_id, "Reply with a session number, or /cancel.")
+            return
+        if chat_id in self.busy_chats:
+            self.send_message(chat_id, "Tomo is still working on the previous message.")
+            return
+
+        self.busy_chats.add(chat_id)
+        thread = threading.Thread(target=self.reply_worker, args=(chat_id, content), daemon=True)
+        thread.start()
+
+    def reply_worker(self, chat_id: str, content: UserContent) -> None:
         done = threading.Event()
         heartbeat = threading.Thread(target=self.work_status_worker, args=(chat_id, done), daemon=True)
         heartbeat.start()
         try:
-            reply = self.tomo.send_text_with_events(
-                chat_id,
-                text,
-                on_event=lambda event: self.send_message(chat_id, event.render(full_input=chat_id in self.debug_tool_chats)),
+            trace_block = TelegramTraceBlock(
+                chat_id=chat_id,
+                gateway=self,
+                full_tool_input=chat_id in self.debug_tool_chats,
             )
+            if isinstance(content, str):
+                reply = self.tomo.send_text_with_events(chat_id, content, on_event=trace_block.add_tool_event)
+            else:
+                reply = self.tomo.send_user_content_with_events(chat_id, content, on_event=trace_block.add_tool_event)
         except Exception as exc:  # noqa: BLE001
             self.send_message(chat_id, f"Error: {exc}")
         else:
@@ -160,9 +239,10 @@ class TelegramGateway:
             if effective_show_reasoning_trace(
                 chat_override=trace_overrides.get(chat_id) if isinstance(trace_overrides, dict) else None
             ) and reply.trace.reasoning_summary:
-                self.send_message(chat_id, f"Reasoning summary: {reply.trace.reasoning_summary}")
-            for error in reply.trace.tool_errors:
-                self.send_message(chat_id, f"Tool error: {error}")
+                trace_block.send_reasoning(reply.trace.reasoning_summary)
+            trace_block.send_tool_errors(reply.trace.tool_errors)
+            for image_url in reply.images:
+                self.send_photo(chat_id, image_url)
             if reply.text:
                 self.send_message(chat_id, reply.text)
         finally:
@@ -270,6 +350,46 @@ class TelegramGateway:
             return
         self.send_message(chat_id, reasoning_usage_message())
 
+    def handle_session_command(self, chat_id: str) -> None:
+        sessions = self.tomo.list_channel_sessions(chat_id)
+        if not sessions:
+            self.send_message(chat_id, "No saved sessions.")
+            return
+        self.pending_session_choices[chat_id] = sessions
+        lines = ["Saved sessions:"]
+        for index, session in enumerate(sessions, start=1):
+            lines.append(f"{index}. {session.metadata.name} - {session.metadata.updated_date} - {session.metadata.id[:8]}")
+        lines.append("Reply with a session number to load it, or /cancel.")
+        self.send_message(chat_id, "\n".join(lines))
+
+    def resolve_session_selection(self, chat_id: str, text: str) -> None:
+        choices = self.pending_session_choices.get(chat_id)
+        if not choices:
+            return
+        stripped = text.strip()
+        if telegram_command(stripped) == "/cancel":
+            self.cancel_session_selection(chat_id)
+            return
+        try:
+            index = int(stripped)
+        except ValueError:
+            self.send_message(chat_id, "Reply with a session number, or /cancel.")
+            return
+        if index < 1 or index > len(choices):
+            self.send_message(chat_id, f"Choose a number from 1 to {len(choices)}, or /cancel.")
+            return
+
+        selected = self.tomo.set_channel_session(chat_id, choices[index - 1].metadata.id)
+        self.pending_session_choices.pop(chat_id, None)
+        self.send_message(chat_id, f"Loaded session: {selected.metadata.name} - {selected.metadata.id[:8]}")
+
+    def cancel_session_selection(self, chat_id: str) -> bool:
+        if chat_id not in self.pending_session_choices:
+            return False
+        self.pending_session_choices.pop(chat_id, None)
+        self.send_message(chat_id, "Session selection cancelled.")
+        return True
+
     def send_message(self, chat_id: str, text: str) -> list[int]:
         message_ids: list[int] = []
         chunks = split_message(text)
@@ -280,6 +400,33 @@ class TelegramGateway:
     def send_message_blob(self, chat_id: str, text: str) -> int:
         data = self.api("sendMessage", {"chat_id": chat_id, "text": text})
         result = data.get("result")
+        if isinstance(result, dict) and isinstance(result.get("message_id"), int):
+            return result["message_id"]
+        return 0
+
+    def send_photo(self, chat_id: str, image_url: str, caption: str | None = None) -> int:
+        if image_url.startswith("data:"):
+            media_type, image_bytes = decode_data_url(image_url)
+            filename = f"image.{extension_for_media_type(media_type)}"
+            data: dict[str, object] = {"chat_id": chat_id}
+            if caption:
+                data["caption"] = caption
+            response = self.client.post(
+                f"{self.api_url}/sendPhoto",
+                data=data,
+                files={"photo": (filename, image_bytes, media_type)},
+            )
+            response.raise_for_status()
+            payload = response.json()
+            if not payload.get("ok"):
+                raise RuntimeError(f"Telegram API error calling sendPhoto: {payload}")
+            result = payload.get("result")
+        else:
+            payload: dict[str, object] = {"chat_id": chat_id, "photo": image_url}
+            if caption:
+                payload["caption"] = caption
+            data = self.api("sendPhoto", payload)
+            result = data.get("result")
         if isinstance(result, dict) and isinstance(result.get("message_id"), int):
             return result["message_id"]
         return 0
@@ -296,6 +443,15 @@ class TelegramGateway:
         except Exception:
             return
 
+    def telegram_image_data_url(self, file_id: str) -> str:
+        file_data = self.api("getFile", {"file_id": file_id})
+        result = file_data.get("result")
+        if not isinstance(result, dict) or not isinstance(result.get("file_path"), str):
+            raise RuntimeError("Telegram did not return a file path for the image.")
+        response = self.client.get(f"https://api.telegram.org/file/bot{self.token}/{result['file_path']}")
+        response.raise_for_status()
+        return f"data:image/jpeg;base64,{b64encode(response.content).decode('ascii')}"
+
     def api(self, method: str, payload: dict[str, object]) -> dict[str, object]:
         response = self.client.post(f"{self.api_url}/{method}", json=payload)
         response.raise_for_status()
@@ -309,6 +465,61 @@ def split_message(text: str) -> list[str]:
     if len(text) <= MAX_TELEGRAM_MESSAGE:
         return [text]
     return [text[index : index + MAX_TELEGRAM_MESSAGE] for index in range(0, len(text), MAX_TELEGRAM_MESSAGE)]
+
+
+def largest_telegram_photo(photos: list[object]) -> dict[str, object] | None:
+    candidates = [photo for photo in photos if isinstance(photo, dict)]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda photo: int(photo.get("file_size") or photo.get("width") or 0))
+
+
+def decode_data_url(data_url: str) -> tuple[str, bytes]:
+    header, encoded = data_url.split(",", 1)
+    media_type = header[5:].split(";", 1)[0] or "application/octet-stream"
+    return media_type, b64decode(encoded)
+
+
+def extension_for_media_type(media_type: str) -> str:
+    return {
+        "image/jpeg": "jpg",
+        "image/png": "png",
+        "image/gif": "gif",
+        "image/webp": "webp",
+    }.get(media_type, "bin")
+
+
+def fit_editable_message(text: str) -> str:
+    if len(text) <= MAX_TELEGRAM_MESSAGE:
+        return text
+    suffix = "\n... truncated"
+    return text[: MAX_TELEGRAM_MESSAGE - len(suffix)] + suffix
+
+
+def render_tool_events_tree(events: list[ToolCallLifecycleEvent], *, full_input: bool = False) -> str:
+    lines = [f"Tool calls ({len(events)})"]
+    for event in events:
+        lines.append(f"• {format_tool_event(event, full_input=full_input)}")
+    return "\n".join(lines)
+
+
+def render_reasoning_tree(summary: str) -> str:
+    lines = ["Thinking"]
+    summary_lines = summary.splitlines() or [summary]
+    lines.extend(summary_lines)
+    return "\n".join(lines)
+
+
+def render_tool_errors_tree(errors: tuple[str, ...]) -> str:
+    lines = [f"Tool errors ({len(errors)})"]
+    for error in errors:
+        lines.append(f"• {error}")
+    return "\n".join(lines)
+
+
+def format_tool_event(event: ToolCallLifecycleEvent, *, full_input: bool = False) -> str:
+    args = format_tool_input(event.input, limit=None if full_input else 50)
+    return f'{event.name}("{args}")'
 
 
 def telegram_command(text: str) -> str | None:

@@ -23,6 +23,7 @@ Tool routing:
 - write_file: create a new file. Prefer edit_file for existing files. Do not overwrite broad/important files unless explicitly requested.
 - terminal: run tests, builds, git, package managers, project CLIs, process checks, file metadata/counts, or exact shell output. Each call runs in a fresh shell from cwd (default "." = workspace root). Use the cwd argument for subdirectories. Do not prefix commands with cd <workspace> &&.
 - browser: use a real headless Chromium browser for web development tasks that require rendered UI, navigation, interaction, screenshots, scrolling, clicking, forms, layout checks, or client-side JavaScript behavior. Prefer browser over web_fetch when validating a local or remote web app visually or interactively. For screenshots, navigate first or pass url to the screenshot action; after saving, confirm the tool output URL/title or page text before claiming the screenshot is usable.
+- generate_image: create an actual image when the user asks to generate, draw, render, or make an image/photo/illustration. Do not describe a fake image in text. Preserve the tool's `IMAGE_URL: ...` marker in your final answer so gateways can send the image.
 - web_search: search public web when no exact URL is known. Do not use for local repo or memory questions.
 - web_fetch: read a specific public HTTP(S) URL. Use query to focus long pages. Do not use as a search engine.
 - task: delegate broad independent multi-step research/search/work. Do not use for simple questions, user interaction, or unverified side effects.

@@ -115,3 +115,30 @@ def test_web_search_fetches_and_ranks_result_content(monkeypatch):
     assert "Source: One" in output
     assert "Source: Two" in output
     assert "ranked target content" in output
+
+
+def test_generate_image_calls_xai_image_generation_endpoint(monkeypatch):
+    calls = []
+
+    monkeypatch.setattr(
+        "tomo.oauth.get_valid_tokens",
+        lambda: SimpleNamespace(access_token="token"),
+    )
+
+    def fake_post(url, **kwargs):
+        calls.append((url, kwargs))
+        return SimpleNamespace(
+            raise_for_status=lambda: None,
+            json=lambda: {"data": [{"url": "https://example.com/generated.jpg"}]},
+        )
+
+    monkeypatch.setattr(tools.httpx, "post", fake_post)
+
+    output = tools.generate_image.invoke({"prompt": "a robot"})
+
+    assert output == "IMAGE_URL: https://example.com/generated.jpg"
+    assert calls[0][0] == "https://api.x.ai/v1/images/generations"
+    assert calls[0][1]["json"] == {
+        "model": "grok-imagine-image-quality",
+        "prompt": "a robot",
+    }

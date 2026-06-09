@@ -37,6 +37,7 @@ CHAT_COMMANDS: tuple[SlashCommand, ...] = (
 
 GATEWAY_COMMANDS: tuple[SlashCommand, ...] = (
     SlashCommand("start", "Show Tomo is ready", frozenset({"gateway"})),
+    SlashCommand("session", "List or switch saved sessions", frozenset({"gateway"})),
     SlashCommand("cancel", "Cancel a pending action", frozenset({"gateway"})),
     SlashCommand("approve", "Approve a pending tool call", frozenset({"gateway"})),
     SlashCommand("deny", "Deny a pending tool call", frozenset({"gateway"})),
