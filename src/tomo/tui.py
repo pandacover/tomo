@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -11,6 +12,7 @@ from prompt_toolkit.application import Application
 from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.layout import HSplit, Layout, Window
+from prompt_toolkit.output import DummyOutput
 from prompt_toolkit.widgets import Label, TextArea
 
 from .agent import SKILL_SOURCES, extract_text, make_agent
@@ -104,7 +106,8 @@ class PromptChat:
                 self.input,
             ]
         )
-        return Application(layout=Layout(root, focused_element=self.input), key_bindings=kb, full_screen=True, mouse_support=True)
+        output = DummyOutput() if not sys.stdout.isatty() else None
+        return Application(layout=Layout(root, focused_element=self.input), key_bindings=kb, full_screen=True, mouse_support=True, output=output)
 
     def run(self) -> None:
         assert self.app is not None

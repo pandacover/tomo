@@ -14,6 +14,7 @@ from .telegram_config import (
 from .token_store import delete_tokens, load_tokens
 from .telegram import restart_telegram, start_telegram, stop_telegram
 from .tui import run_chat
+from .desktop import run_desktop
 
 
 def main() -> None:
@@ -23,6 +24,7 @@ def main() -> None:
     subparsers.add_parser("logout", help="Delete local OAuth tokens")
     subparsers.add_parser("auth-status", help="Show local auth status")
     subparsers.add_parser("chat", help="Launch the prompt_toolkit chat UI")
+    subparsers.add_parser("desktop", help="Launch the Windows tray chat app")
     telegram_parser = subparsers.add_parser("telegram", help="Manage the Telegram chat gateway")
     telegram_subparsers = telegram_parser.add_subparsers(dest="telegram_command")
     telegram_subparsers.add_parser("start", help="Start the Telegram gateway in the background")
@@ -52,6 +54,8 @@ def main() -> None:
             auth_status()
         case "chat":
             run_chat()
+        case "desktop":
+            desktop()
         case "telegram":
             telegram(args)
         case "telegram-config":
@@ -71,6 +75,13 @@ def auth_status() -> None:
     if tokens.expired:
         get_valid_tokens()
         print("Access token refreshed.")
+
+
+def desktop() -> None:
+    if load_tokens() is None:
+        print("Not logged in. Run `uv run tomo login` first.")
+        return
+    run_desktop()
 
 
 def telegram_config(args: argparse.Namespace) -> None:
