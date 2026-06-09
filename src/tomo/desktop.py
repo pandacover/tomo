@@ -6,7 +6,7 @@ import queue
 import threading
 from collections.abc import Callable
 from dataclasses import asdict
-from typing import Any
+from typing import Any, NamedTuple
 from uuid import uuid4
 
 from .config import settings
@@ -15,7 +15,17 @@ from .tools import ApprovalRequest
 
 
 DESKTOP_CHANNEL_ID = "desktop:local"
+FLYOUT_WIDTH = 420
+FLYOUT_HEIGHT = 620
+FLYOUT_MARGIN = 12
 DesktopEvent = dict[str, Any]
+
+
+class Rect(NamedTuple):
+    left: int
+    top: int
+    right: int
+    bottom: int
 
 
 class DesktopApprovalResponder:
@@ -145,6 +155,7 @@ class DesktopBridge:
         if self.window is not None:
             call_window(self.window, "show")
             call_window(self.window, "restore")
+            call_window(self.window, "focus")
         return {"ok": True}
 
     def hide_window(self) -> dict[str, object]:
@@ -207,10 +218,15 @@ class DesktopApp:
             "Tomo",
             html=DESKTOP_HTML,
             js_api=DesktopApi(self.bridge),
-            width=720,
-            height=860,
+            width=720 if self.wsl_mode else FLYOUT_WIDTH,
+            height=860 if self.wsl_mode else FLYOUT_HEIGHT,
             min_size=(420, 520),
             hidden=not self.wsl_mode,
+            resizable=self.wsl_mode,
+            frameless=not self.wsl_mode,
+            easy_drag=False,
+            draggable=False,
+            maximized=False,
             text_select=True,
         )
         self.bridge.set_window(window)
@@ -243,7 +259,7 @@ class DesktopApp:
                 icon=create_tray_image(),
                 title="Tomo",
                 menu=pystray.Menu(
-                    pystray.MenuItem("Open Tomo", self._open_from_tray, default=True),
+                    pystray.MenuItem("Open Tomo", self._show_flyout_from_tray, default=True),
                     pystray.Menu.SEPARATOR,
                     pystray.MenuItem("Quit", self._quit_from_tray),
                 ),
@@ -256,8 +272,20 @@ class DesktopApp:
             raise
         return True
 
-    def _open_from_tray(self, *_: object) -> None:
+    def _show_flyout_from_tray(self, *_: object) -> None:
+        self._position_flyout()
         self.bridge.show_window()
+
+    def _position_flyout(self) -> None:
+        if self.bridge.window is None:
+            return
+        work_area = get_windows_work_area()
+        width = min(FLYOUT_WIDTH, max(320, work_area.right - work_area.left - (FLYOUT_MARGIN * 2)))
+        height = min(FLYOUT_HEIGHT, max(420, work_area.bottom - work_area.top - (FLYOUT_MARGIN * 2)))
+        x = work_area.right - width - FLYOUT_MARGIN
+        y = work_area.bottom - height - FLYOUT_MARGIN
+        resize_window(self.bridge.window, width, height)
+        move_window(self.bridge.window, x, y)
 
     def _quit_from_tray(self, *_: object) -> None:
         self._quit()
@@ -307,6 +335,31 @@ def call_window(target: object, method_name: str) -> None:
     method = getattr(target, method_name, None)
     if callable(method):
         method()
+
+
+def move_window(window: object, x: int, y: int) -> None:
+    method = getattr(window, "move", None)
+    if callable(method):
+        method(x, y)
+
+
+def resize_window(window: object, width: int, height: int) -> None:
+    method = getattr(window, "resize", None)
+    if callable(method):
+        method(width, height)
+
+
+def get_windows_work_area() -> Rect:
+    if os.name != "nt":
+        return Rect(0, 0, 1920, 1080)
+    import ctypes
+    from ctypes import wintypes
+
+    work_area = wintypes.RECT()
+    spi_getworkarea = 0x0030
+    if ctypes.windll.user32.SystemParametersInfoW(spi_getworkarea, 0, ctypes.byref(work_area), 0):
+        return Rect(work_area.left, work_area.top, work_area.right, work_area.bottom)
+    return Rect(0, 0, 1920, 1080)
 
 
 def create_tray_image() -> object:

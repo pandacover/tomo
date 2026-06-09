@@ -6,7 +6,7 @@ import threading
 import time
 from types import SimpleNamespace
 
-from tomo.desktop import DesktopApi, DesktopApp, DesktopBridge, DesktopApprovalResponder, EventEmitter, run_desktop, validate_wsl_qt_backend
+from tomo.desktop import DesktopApi, DesktopApp, DesktopBridge, DesktopApprovalResponder, EventEmitter, Rect, run_desktop, validate_wsl_qt_backend
 from tomo.gateway import AgentTrace, GatewayReply, ToolCallLifecycleEvent
 from tomo.session_store import create_session
 from tomo.tools import ApprovalRequest
@@ -47,7 +47,10 @@ class FakeWindow:
         self.hidden = False
         self.shown = False
         self.restored = False
+        self.focused = False
         self.destroyed = False
+        self.position: tuple[int, int] | None = None
+        self.size: tuple[int, int] | None = None
 
     def hide(self) -> None:
         self.hidden = True
@@ -57,6 +60,15 @@ class FakeWindow:
 
     def restore(self) -> None:
         self.restored = True
+
+    def focus(self) -> None:
+        self.focused = True
+
+    def move(self, x: int, y: int) -> None:
+        self.position = (x, y)
+
+    def resize(self, width: int, height: int) -> None:
+        self.size = (width, height)
 
     def destroy(self) -> None:
         self.destroyed = True
@@ -250,6 +262,22 @@ def test_desktop_app_quit_destroys_window_and_stops_tray():
     assert tray.stopped is True
 
 
+def test_desktop_app_tray_click_shows_bottom_right_flyout(monkeypatch):
+    bridge = DesktopBridge(tomo=FakeTomo())
+    window = FakeWindow()
+    bridge.set_window(window)
+    app = DesktopApp(bridge=bridge, wsl_mode=False)
+    monkeypatch.setattr("tomo.desktop.get_windows_work_area", lambda: Rect(0, 0, 1440, 900))
+
+    app._show_flyout_from_tray()
+
+    assert window.size == (420, 620)
+    assert window.position == (1008, 268)
+    assert window.shown is True
+    assert window.restored is True
+    assert window.focused is True
+
+
 def test_cli_desktop_refuses_when_not_logged_in(monkeypatch, capsys):
     from tomo import cli
 
@@ -322,6 +350,8 @@ def test_desktop_app_wsl_uses_qt_and_visible_window(monkeypatch, capsys):
 
     assert os.environ["QT_API"] == "pyside6"
     assert created["kwargs"]["hidden"] is False
+    assert created["kwargs"]["resizable"] is True
+    assert created["kwargs"]["frameless"] is False
     assert started == {"gui": "qt"}
     assert tray_calls == []
     assert "WSL window mode" in capsys.readouterr().out
@@ -358,6 +388,13 @@ def test_desktop_app_native_windows_starts_hidden_with_default_webview(monkeypat
     DesktopApp(bridge=DesktopBridge(tomo=FakeTomo()), wsl_mode=False).run()
 
     assert created["kwargs"]["hidden"] is True
+    assert created["kwargs"]["width"] == 420
+    assert created["kwargs"]["height"] == 620
+    assert created["kwargs"]["resizable"] is False
+    assert created["kwargs"]["frameless"] is True
+    assert created["kwargs"]["easy_drag"] is False
+    assert created["kwargs"]["draggable"] is False
+    assert created["kwargs"]["maximized"] is False
     assert isinstance(created["kwargs"]["js_api"], DesktopApi)
     assert not isinstance(created["kwargs"]["js_api"], DesktopBridge)
     assert started == {"called": True, "kwargs": {}}
