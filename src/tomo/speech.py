@@ -143,11 +143,15 @@ class RecognitionOutcome(NamedTuple):
     error: str = ""
 
 
-async def recognize_once(recognizer: object) -> RecognitionOutcome:
+async def _compile_constraints(recognizer: object) -> None:
     compile_result = await call_async(recognizer.compile_constraints_async())
     status = getattr(compile_result, "status", None)
     if status is not None and int(status) != 0:
         raise RuntimeError(f"Windows speech recognition constraints failed to compile: {status}")
+
+
+async def recognize_once(recognizer: object) -> RecognitionOutcome:
+    await _compile_constraints(recognizer)
     result = await call_async(recognizer.recognize_async())
     return recognition_result_outcome(result)
 
@@ -157,10 +161,7 @@ async def recognize_continuous(
     is_current: Callable[[int], bool],
     generation: int,
 ) -> str:
-    compile_result = await call_async(recognizer.compile_constraints_async())
-    status = getattr(compile_result, "status", None)
-    if status is not None and int(status) != 0:
-        raise RuntimeError(f"Windows speech recognition constraints failed to compile: {status}")
+    await _compile_constraints(recognizer)
 
     session = getattr(recognizer, "continuous_recognition_session", None)
     if session is None:
