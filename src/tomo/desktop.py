@@ -813,7 +813,8 @@ button.danger {{ background: var(--danger); border-color: var(--danger); }}
 }}
 .voice-button svg {{ width: 17px; height: 17px; stroke-width: 2; }}
 .voice-button.listening,
-.voice-button.sending {{ background: transparent; border-color: var(--accent); color: var(--accent); }}
+.voice-button.sending,
+.voice-button.working {{ background: transparent; border-color: var(--accent); color: var(--accent); }}
 button:disabled {{ opacity: .45; cursor: default; }}
 .empty {{ display: none; }}
 </style>
@@ -869,6 +870,14 @@ function api() {{ return window.pywebview.api; }}
 function setBusy(value) {{
   busy = value;
   voice.disabled = value || !!pendingApproval;
+  voice.classList.toggle('working', value);
+  if (value) {{
+    voiceLabel.textContent = 'Sending';
+    voice.title = 'Sending';
+    voice.setAttribute('aria-label', voice.title);
+  }} else {{
+    updateVoiceButton();
+  }}
 }}
 function clearEmpty() {{
   const empty = transcript.querySelector('.empty');
@@ -967,13 +976,16 @@ function hideApproval() {{
 }}
 function setVoiceState(nextState) {{
   voiceState = nextState || 'idle';
+  updateVoiceButton();
+  setBusy(busy);
+  scheduleResize();
+}}
+function updateVoiceButton() {{
   voice.classList.toggle('listening', voiceState === 'listening');
   voice.classList.toggle('sending', voiceState === 'sending');
   voiceLabel.textContent = voiceState === 'listening' ? 'Cancel' : voiceState === 'sending' ? 'Stop' : 'Speak';
   voice.title = voiceState === 'listening' ? 'Cancel listening' : voiceState === 'sending' ? 'Stop sending' : 'Speak';
   voice.setAttribute('aria-label', voice.title);
-  setBusy(busy);
-  scheduleResize();
 }}
 async function handleEvent(event) {{
   if (event.type === 'busy') setBusy(event.busy);

@@ -435,6 +435,7 @@ def test_desktop_html_renders_tools_in_transcript_without_status_label():
     assert "Listening..." not in desktop.DESKTOP_HTML
     assert "Cancel listening" in desktop.DESKTOP_HTML
     assert "Stop sending" in desktop.DESKTOP_HTML
+    assert "voiceLabel.textContent = 'Sending'" in desktop.DESKTOP_HTML
 
 
 def test_cli_desktop_refuses_when_not_logged_in(monkeypatch, capsys):

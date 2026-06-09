@@ -4,6 +4,8 @@ import asyncio
 import os
 import threading
 from collections.abc import Awaitable, Callable
+from datetime import timedelta
+from typing import NamedTuple
 
 
 VoiceStateCallback = Callable[[str], None]
@@ -14,6 +16,12 @@ SPEECH_PRIVACY_MESSAGE = (
     "Windows speech recognition is disabled by privacy settings. Open Windows Settings > Privacy & security > "
     "Speech and turn on speech recognition/online speech recognition, then restart Tomo."
 )
+RETRYABLE_EMPTY_RECOGNITION_STATUSES = {
+    6,  # Unknown; Windows can return this as an empty one-shot result while audio is still active.
+    7,  # TimeoutExceeded
+    8,  # PauseLimitExceeded
+}
+CONTINUOUS_SILENCE_TIMEOUT_SECONDS = 2.0
 
 
 class WindowsSpeechInput:
@@ -76,7 +84,7 @@ class WindowsSpeechInput:
                 self._recognizer = recognizer
                 self._loop = loop
             self.on_state("listening")
-            text = loop.run_until_complete(recognize_once(recognizer))
+            text = loop.run_until_complete(recognize_continuous(recognizer, self._is_current, generation))
             if text and self._is_current(generation):
                 self.on_final(text)
         except Exception as exc:  # noqa: BLE001
@@ -129,16 +137,102 @@ def create_windows_recognizer() -> object:
     return recognizer
 
 
-async def recognize_once(recognizer: object) -> str:
+class RecognitionOutcome(NamedTuple):
+    text: str
+    retry: bool = False
+    error: str = ""
+
+
+async def recognize_once(recognizer: object) -> RecognitionOutcome:
     compile_result = await call_async(recognizer.compile_constraints_async())
     status = getattr(compile_result, "status", None)
     if status is not None and int(status) != 0:
         raise RuntimeError(f"Windows speech recognition constraints failed to compile: {status}")
     result = await call_async(recognizer.recognize_async())
-    return recognition_result_text(result)
+    return recognition_result_outcome(result)
+
+
+async def recognize_continuous(
+    recognizer: object,
+    is_current: Callable[[int], bool],
+    generation: int,
+) -> str:
+    compile_result = await call_async(recognizer.compile_constraints_async())
+    status = getattr(compile_result, "status", None)
+    if status is not None and int(status) != 0:
+        raise RuntimeError(f"Windows speech recognition constraints failed to compile: {status}")
+
+    session = getattr(recognizer, "continuous_recognition_session", None)
+    if session is None:
+        return await recognize_continuous_fallback(recognizer, is_current, generation)
+
+    session.auto_stop_silence_timeout = timedelta(
+        seconds=CONTINUOUS_SILENCE_TIMEOUT_SECONDS
+    )
+    parts: list[str] = []
+    last_result_at: float | None = None
+    completed = asyncio.Event()
+    loop = asyncio.get_running_loop()
+
+    def handle_result_generated(sender: object, event_args: object) -> None:
+        nonlocal last_result_at
+        result = getattr(event_args, "result", None)
+        text = recognition_result_text(result)
+        if text:
+            parts.append(text)
+            last_result_at = loop.time()
+
+    def handle_completed(sender: object, event_args: object) -> None:
+        loop.call_soon_threadsafe(completed.set)
+
+    token = session.add_result_generated(handle_result_generated)
+    completed_token = session.add_completed(handle_completed)
+    try:
+        await call_async(session.start_async())
+        while is_current(generation) and not completed.is_set():
+            now = loop.time()
+            if last_result_at is not None and now - last_result_at >= CONTINUOUS_SILENCE_TIMEOUT_SECONDS:
+                break
+            await asyncio.sleep(0.05)
+    finally:
+        try:
+            await stop_continuous_session(session)
+        finally:
+            remove = getattr(session, "remove_result_generated", None)
+            if callable(remove):
+                remove(token)
+            remove_completed = getattr(session, "remove_completed", None)
+            if callable(remove_completed):
+                remove_completed(completed_token)
+
+    return " ".join(parts).strip()
+
+
+async def recognize_continuous_fallback(
+    recognizer: object,
+    is_current: Callable[[int], bool],
+    generation: int,
+) -> str:
+    parts: list[str] = []
+    while is_current(generation):
+        outcome = await recognize_once(recognizer)
+        if outcome.text:
+            parts.append(outcome.text)
+            break
+        if not outcome.retry:
+            raise RuntimeError(
+                outcome.error or "Windows speech recognition stopped without transcribed text."
+            )
+    return " ".join(parts).strip()
 
 
 async def stop_recognition(recognizer: object) -> None:
+    session = getattr(recognizer, "continuous_recognition_session", None)
+    if session is not None:
+        operation = getattr(session, "stop_async", None)
+        if callable(operation):
+            await stop_continuous_session(session)
+            return
     operation = getattr(recognizer, "stop_recognition_async", None)
     if callable(operation):
         await call_async(operation())
@@ -148,9 +242,43 @@ async def call_async(operation: Awaitable[object]) -> object:
     return await operation
 
 
+async def stop_continuous_session(session: object) -> None:
+    operation = getattr(session, "stop_async", None)
+    if not callable(operation):
+        return
+    try:
+        await call_async(operation())
+    except OSError as exc:
+        if getattr(exc, "winerror", None) == -2146233079:
+            return
+        raise
+
+
 def recognition_result_text(result: object) -> str:
     text = getattr(result, "text", "")
     return str(text).strip()
+
+
+def recognition_result_outcome(result: object) -> RecognitionOutcome:
+    text = recognition_result_text(result)
+    if text:
+        return RecognitionOutcome(text=text)
+    status = getattr(result, "status", None)
+    status_code = recognition_status_code(status)
+    if status is None or status_code in RETRYABLE_EMPTY_RECOGNITION_STATUSES:
+        return RecognitionOutcome(text="", retry=True)
+    return RecognitionOutcome(
+        text="",
+        retry=False,
+        error=f"Windows speech recognition ended without text: status {status_code if status_code is not None else status}",
+    )
+
+
+def recognition_status_code(status: object) -> int | None:
+    try:
+        return int(status)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
 
 
 def format_speech_error(exc: Exception) -> str:
