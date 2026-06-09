@@ -96,6 +96,22 @@ def test_files_search_normalizes_multiline_queries(tmp_path, monkeypatch):
     assert "\n" not in str(seen["command"])
 
 
+def test_files_search_invokes_rg_without_shell(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    seen: dict[str, object] = {}
+
+    def fake_run(command, *args, **kwargs):
+        seen["command"] = command
+        seen["shell"] = kwargs.get("shell")
+        return SimpleNamespace(returncode=1, stdout="", stderr="")
+
+    monkeypatch.setattr(tools.subprocess, "run", fake_run)
+
+    assert tools.files_search.invoke({"query": "hello world"}) == "No matches found."
+    assert seen["command"] == ["rg", "--line-number", "--no-heading", "--smart-case", "hello world", str(tmp_path)]
+    assert seen["shell"] is None
+
+
 def test_extract_text_does_not_render_empty_internal_state():
     assert extract_text({}) == ""
     assert extract_text({"messages": []}) == ""
@@ -114,6 +130,48 @@ def test_terminal_runs_from_workspace_by_default(tmp_path, monkeypatch):
     assert f"CWD: {tmp_path}" in result
     assert str(tmp_path) in result
     assert "Exit code: 0" in result
+
+
+def test_terminal_uses_powershell_on_windows(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(tools.platform, "system", lambda: "Windows")
+    seen: dict[str, object] = {}
+
+    def fake_run(command, *args, **kwargs):
+        seen["command"] = command
+        seen["shell"] = kwargs.get("shell")
+        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(tools.subprocess, "run", fake_run)
+
+    result = tools.terminal.invoke({"command": "Get-ChildItem"})
+
+    assert seen["command"] == [
+        "powershell.exe",
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        "Get-ChildItem",
+    ]
+    assert seen["shell"] is False
+    assert "Exit code: 0\nok" in result
+
+
+def test_terminal_uses_bash_on_posix(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(tools.platform, "system", lambda: "Linux")
+    seen: dict[str, object] = {}
+
+    def fake_run(command, *args, **kwargs):
+        seen["command"] = command
+        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(tools.subprocess, "run", fake_run)
+
+    assert "Exit code: 0\nok" in tools.terminal.invoke({"command": "pwd"})
+    assert seen["command"] == ["/bin/bash", "-lc", "pwd"]
 
 
 def test_terminal_accepts_relative_cwd(tmp_path, monkeypatch):

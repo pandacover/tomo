@@ -6,7 +6,7 @@ import threading
 import time
 from types import SimpleNamespace
 
-from tomo.desktop import DesktopApp, DesktopBridge, DesktopApprovalResponder, EventEmitter, run_desktop, validate_wsl_qt_backend
+from tomo.desktop import DesktopApi, DesktopApp, DesktopBridge, DesktopApprovalResponder, EventEmitter, run_desktop, validate_wsl_qt_backend
 from tomo.gateway import AgentTrace, GatewayReply, ToolCallLifecycleEvent
 from tomo.session_store import create_session
 from tomo.tools import ApprovalRequest
@@ -62,6 +62,14 @@ class FakeWindow:
         self.destroyed = True
 
 
+class FakeTrayIcon:
+    def __init__(self) -> None:
+        self.stopped = False
+
+    def stop(self) -> None:
+        self.stopped = True
+
+
 def wait_for_idle(bridge: DesktopBridge) -> None:
     deadline = time.monotonic() + 2
     while bridge.busy and time.monotonic() < deadline:
@@ -83,6 +91,25 @@ def test_desktop_bridge_bootstrap_returns_session_metadata_and_messages():
         {"role": "user", "text": "hello", "images": []},
         {"role": "assistant", "text": "hi", "images": []},
     ]
+
+
+def test_desktop_api_exposes_only_narrow_bridge_methods():
+    bridge = DesktopBridge(tomo=FakeTomo())
+    api = DesktopApi(bridge)
+
+    public_names = [name for name in dir(api) if not name.startswith("_")]
+
+    assert public_names == [
+        "bootstrap",
+        "hide_window",
+        "poll_events",
+        "quit_app",
+        "resolve_approval",
+        "send_message",
+        "show_window",
+    ]
+    assert api.bootstrap()["ok"] is True
+    assert api.poll_events() == []
 
 
 def test_desktop_bridge_send_message_rejects_empty_text():
@@ -186,25 +213,41 @@ def test_desktop_approval_responder_resolves_deny():
     assert result["approved"] is False
 
 
-def test_desktop_app_close_hides_window_and_cancels_close():
+def test_desktop_app_close_exits_on_native_windows():
     bridge = DesktopBridge(tomo=FakeTomo())
     window = FakeWindow()
     bridge.set_window(window)
     app = DesktopApp(bridge=bridge, wsl_mode=False)
 
-    assert app.on_window_closing() is False
-    assert window.hidden is True
+    assert app.on_window_closing() is True
+    assert bridge.quitting is True
+    assert window.hidden is False
 
 
 def test_desktop_app_close_allows_explicit_quit():
     bridge = DesktopBridge(tomo=FakeTomo())
     window = FakeWindow()
     bridge.set_window(window)
-    bridge.quitting = True
     app = DesktopApp(bridge=bridge, wsl_mode=False)
+    bridge.quitting = True
 
     assert app.on_window_closing() is True
     assert window.hidden is False
+
+
+def test_desktop_app_quit_destroys_window_and_stops_tray():
+    bridge = DesktopBridge(tomo=FakeTomo())
+    window = FakeWindow()
+    tray = FakeTrayIcon()
+    bridge.set_window(window)
+    app = DesktopApp(bridge=bridge, wsl_mode=False)
+    app.tray_icon = tray
+
+    app._quit()
+
+    assert bridge.quitting is True
+    assert window.destroyed is True
+    assert tray.stopped is True
 
 
 def test_cli_desktop_refuses_when_not_logged_in(monkeypatch, capsys):
@@ -315,6 +358,8 @@ def test_desktop_app_native_windows_starts_hidden_with_default_webview(monkeypat
     DesktopApp(bridge=DesktopBridge(tomo=FakeTomo()), wsl_mode=False).run()
 
     assert created["kwargs"]["hidden"] is True
+    assert isinstance(created["kwargs"]["js_api"], DesktopApi)
+    assert not isinstance(created["kwargs"]["js_api"], DesktopBridge)
     assert started == {"called": True, "kwargs": {}}
 
 

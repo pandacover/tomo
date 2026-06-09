@@ -3,6 +3,7 @@ from __future__ import annotations
 import html
 from html.parser import HTMLParser
 import ipaddress
+import platform
 import re
 import shlex
 import socket
@@ -20,8 +21,8 @@ from rank_bm25 import BM25Okapi
 from .browser_tools import browser
 
 
-MAX_BASH_OUTPUT = 20_000
-BASH_TIMEOUT_SECONDS = 60
+MAX_TERMINAL_OUTPUT = 20_000
+TERMINAL_TIMEOUT_SECONDS = 60
 WEB_TIMEOUT_SECONDS = 10
 MAX_WEB_BYTES = 500_000
 MAX_WEB_FETCH_OUTPUT = 12_000
@@ -91,14 +92,14 @@ def generate_image(prompt: str) -> str:
 
 @tool("terminal")
 def terminal(command: str, cwd: str = ".") -> str:
-    """Run a fresh non-interactive bash command.
+    """Run a fresh non-interactive shell command.
 
 cwd defaults to "." which means the workspace root/current launch directory.
 Shell state does not persist between calls. Use cwd for subdirectories.
 Do not prefix commands with cd <workspace> &&; terminal already starts there.
 Use for tests, project CLIs, git/status checks, package commands, file metadata, and exact command output.
 """
-    blocked = _blocked_bash_reason(command)
+    blocked = _blocked_terminal_reason(command)
     if blocked:
         return f"Error: blocked terminal command: {blocked}"
 
@@ -113,16 +114,18 @@ Use for tests, project CLIs, git/status checks, package commands, file metadata,
 
     try:
         result = subprocess.run(
-            command,
+            _shell_command(command),
             cwd=target_cwd,
-            shell=True,
-            executable="/bin/bash",
+            shell=False,
             text=True,
             capture_output=True,
-            timeout=BASH_TIMEOUT_SECONDS,
+            timeout=TERMINAL_TIMEOUT_SECONDS,
         )
     except subprocess.TimeoutExpired:
-        return f"Error: command timed out after {BASH_TIMEOUT_SECONDS}s."
+        return f"Error: command timed out after {TERMINAL_TIMEOUT_SECONDS}s."
+    except FileNotFoundError as exc:
+        shell = _shell_command(command)[0]
+        return f"Error: shell not found: {shell} ({exc})"
 
     output = ""
     if result.stdout:
@@ -130,8 +133,8 @@ Use for tests, project CLIs, git/status checks, package commands, file metadata,
     if result.stderr:
         output += ("\n" if output else "") + result.stderr
     output = output.strip()
-    if len(output) > MAX_BASH_OUTPUT:
-        output = output[:MAX_BASH_OUTPUT] + "\n... output truncated ..."
+    if len(output) > MAX_TERMINAL_OUTPUT:
+        output = output[:MAX_TERMINAL_OUTPUT] + "\n... output truncated ..."
 
     prefix = f"CWD: {target_cwd}\nExit code: {result.returncode}"
     return f"{prefix}\n{output}" if output else prefix
@@ -167,24 +170,23 @@ def files_search(query: str, path: str = ".", k: int = 20) -> str:
     reason = _approval_reason(target)
     if reason:
         return f"Error: search path {path} {reason}"
-    command = f"rg --line-number --no-heading --smart-case {shlex.quote(query)} {shlex.quote(str(target))}"
     try:
         result = subprocess.run(
-            command,
+            ["rg", "--line-number", "--no-heading", "--smart-case", query, str(target)],
             cwd=_workspace(),
-            shell=True,
-            executable="/bin/bash",
             text=True,
             capture_output=True,
-            timeout=BASH_TIMEOUT_SECONDS,
+            timeout=TERMINAL_TIMEOUT_SECONDS,
         )
     except subprocess.TimeoutExpired:
-        return f"Error: search timed out after {BASH_TIMEOUT_SECONDS}s."
+        return f"Error: search timed out after {TERMINAL_TIMEOUT_SECONDS}s."
+    except FileNotFoundError:
+        return "Error: rg command not found on this system."
     output = "\n".join(part for part in (result.stdout.strip(), result.stderr.strip()) if part)
     if result.returncode == 1:
         return "No matches found."
     if result.returncode != 0:
-        detail = output[:MAX_BASH_OUTPUT] if output else "ripgrep failed without output."
+        detail = output[:MAX_TERMINAL_OUTPUT] if output else "ripgrep failed without output."
         return f"Error: rg exited with code {result.returncode}\n{detail}"
     lines = result.stdout.splitlines()
     ranked = rank_texts(query, lines, k=k)
@@ -529,7 +531,13 @@ def _approval_reason(path: Path) -> str | None:
     return None
 
 
-def _bash_approval_reason(command: str) -> str | None:
+def _shell_command(command: str) -> list[str]:
+    if platform.system() == "Windows":
+        return ["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", command]
+    return ["/bin/bash", "-lc", command]
+
+
+def _terminal_approval_reason(command: str) -> str | None:
     try:
         tokens = shlex.split(command)
     except ValueError as exc:
@@ -553,7 +561,7 @@ def _looks_like_path(token: str) -> bool:
     return "/" in token
 
 
-def _blocked_bash_reason(command: str) -> str | None:
+def _blocked_terminal_reason(command: str) -> str | None:
     normalized = " ".join(command.lower().split())
     blocked_patterns = ["rm -rf /", "git reset --hard", "mkfs", "shutdown", "reboot"]
     for pattern in blocked_patterns:

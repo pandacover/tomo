@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import signal
 import threading
 import time
 
@@ -11,6 +13,7 @@ from tomo.telegram import (
     YOLO_STATUS_ENABLED,
     decode_data_url,
     parse_allowed_chat_ids,
+    process_is_running,
     read_pid,
     split_message,
     start_telegram,
@@ -167,6 +170,7 @@ def test_stop_telegram_terminates_running_gateway(tmp_path, monkeypatch, capsys)
     running = {12345}
 
     monkeypatch.setattr(settings, "data_dir", tmp_path)
+    monkeypatch.setattr("tomo.telegram.os.name", "posix", raising=False)
     monkeypatch.setattr("tomo.telegram.process_is_running", lambda pid: pid in running)
 
     def fake_kill(pid: int, sig: int) -> None:
@@ -183,13 +187,68 @@ def test_stop_telegram_terminates_running_gateway(tmp_path, monkeypatch, capsys)
     assert "Telegram gateway stopped." in capsys.readouterr().out
 
 
+def test_process_is_running_treats_windows_invalid_parameter_as_not_running(monkeypatch):
+    monkeypatch.setattr(os, "name", "nt", raising=False)
+
+    def fake_kill(pid: int, sig: int) -> None:
+        assert pid == 12345
+        assert sig == 0
+        raise OSError(22, "The parameter is incorrect")
+
+    monkeypatch.setattr("tomo.telegram.os.kill", fake_kill)
+
+    assert process_is_running(12345) is False
+
+
+def test_stop_telegram_removes_stale_windows_pid_file(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    write_pid(telegram_pid_path(), 12345)
+
+    def fake_kill(pid: int, sig: int) -> None:
+        assert pid == 12345
+        assert sig == 0
+        raise OSError(22, "The parameter is incorrect")
+
+    monkeypatch.setattr("tomo.telegram.os.name", "nt", raising=False)
+    monkeypatch.setattr("tomo.telegram.os.kill", fake_kill)
+
+    stop_telegram()
+
+    assert not telegram_pid_path().exists()
+    assert "removed stale PID file" in capsys.readouterr().out
+
+
+def test_stop_telegram_uses_taskkill_on_windows(tmp_path, monkeypatch, capsys):
+    calls: list[list[str]] = []
+    running = {12345}
+
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    monkeypatch.setattr("tomo.telegram.os.name", "nt", raising=False)
+    monkeypatch.setattr("tomo.telegram.process_is_running", lambda pid: pid in running)
+
+    def fake_run(command, *args, **kwargs):
+        calls.append(command)
+        running.discard(int(command[2]))
+        return object()
+
+    monkeypatch.setattr("tomo.telegram.subprocess.run", fake_run)
+    write_pid(telegram_pid_path(), 12345)
+
+    stop_telegram()
+
+    assert calls == [["taskkill", "/PID", "12345", "/T"]]
+    assert not telegram_pid_path().exists()
+    assert "Telegram gateway stopped." in capsys.readouterr().out
+
+
 def test_telegram_config_round_trips_locally(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "data_dir", tmp_path)
 
     save_telegram_config(TelegramConfig(bot_token="123:token", allowed_chat_ids=[111, 222]))
 
     assert load_telegram_config() == TelegramConfig(bot_token="123:token", allowed_chat_ids=[111, 222])
-    assert (tmp_path / "telegram.json").stat().st_mode & 0o777 == 0o600
+    if os.name != "nt":
+        assert (tmp_path / "telegram.json").stat().st_mode & 0o777 == 0o600
 
     delete_telegram_config()
 

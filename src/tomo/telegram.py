@@ -594,7 +594,7 @@ def stop_telegram() -> None:
         print("Telegram gateway was not running; removed stale PID file.")
         return
 
-    os.kill(pid, signal.SIGTERM)
+    stop_process(pid, force=False)
     deadline = time.monotonic() + 10
     while time.monotonic() < deadline:
         if not process_is_running(pid):
@@ -603,7 +603,7 @@ def stop_telegram() -> None:
             return
         time.sleep(0.1)
 
-    os.kill(pid, signal.SIGKILL)
+    stop_process(pid, force=True)
     pid_path.unlink(missing_ok=True)
     print("Telegram gateway stopped forcefully.")
 
@@ -633,6 +633,16 @@ def write_pid(path: Path, pid: int) -> None:
     path.write_text(f"{pid}\n", encoding="utf-8")
 
 
+def stop_process(pid: int, *, force: bool) -> None:
+    if os.name == "nt":
+        command = ["taskkill", "/PID", str(pid), "/T"]
+        if force:
+            command.append("/F")
+        subprocess.run(command, text=True, capture_output=True, timeout=30)
+        return
+    os.kill(pid, signal.SIGKILL if force else signal.SIGTERM)
+
+
 def process_is_running(pid: int) -> bool:
     try:
         os.kill(pid, 0)
@@ -640,4 +650,8 @@ def process_is_running(pid: int) -> bool:
         return False
     except PermissionError:
         return True
+    except OSError:
+        if os.name == "nt":
+            return False
+        raise
     return True

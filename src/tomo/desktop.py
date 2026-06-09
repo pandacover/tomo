@@ -162,6 +162,34 @@ class DesktopBridge:
         return {"ok": True}
 
 
+class DesktopApi:
+    __slots__ = ("_bridge",)
+
+    def __init__(self, bridge: DesktopBridge) -> None:
+        self._bridge = bridge
+
+    def bootstrap(self) -> dict[str, object]:
+        return self._bridge.bootstrap()
+
+    def poll_events(self) -> list[DesktopEvent]:
+        return self._bridge.poll_events()
+
+    def send_message(self, text: str) -> dict[str, object]:
+        return self._bridge.send_message(text)
+
+    def resolve_approval(self, approval_id: str, approved: bool) -> dict[str, object]:
+        return self._bridge.resolve_approval(approval_id, approved)
+
+    def show_window(self) -> dict[str, object]:
+        return self._bridge.show_window()
+
+    def hide_window(self) -> dict[str, object]:
+        return self._bridge.hide_window()
+
+    def quit_app(self) -> dict[str, object]:
+        return self._bridge.quit_app()
+
+
 class DesktopApp:
     def __init__(self, bridge: DesktopBridge | None = None, *, wsl_mode: bool | None = None) -> None:
         self.bridge = bridge or DesktopBridge()
@@ -178,7 +206,7 @@ class DesktopApp:
         window = webview.create_window(
             "Tomo",
             html=DESKTOP_HTML,
-            js_api=self.bridge,
+            js_api=DesktopApi(self.bridge),
             width=720,
             height=860,
             min_size=(420, 520),
@@ -201,9 +229,10 @@ class DesktopApp:
             return True
         if self.bridge.quitting:
             return True
-        if self.bridge.window is not None:
-            call_window(self.bridge.window, "hide")
-        return False
+        self.bridge.quitting = True
+        if self.tray_icon is not None:
+            threading.Thread(target=lambda: call_window(self.tray_icon, "stop"), daemon=True).start()
+        return True
 
     def _start_tray(self) -> bool:
         try:
@@ -235,10 +264,10 @@ class DesktopApp:
 
     def _quit(self) -> None:
         self.bridge.quitting = True
-        if self.tray_icon is not None:
-            call_window(self.tray_icon, "stop")
         if self.bridge.window is not None:
             call_window(self.bridge.window, "destroy")
+        if self.tray_icon is not None:
+            call_window(self.tray_icon, "stop")
 
 
 def message_to_dto(message: dict[str, Any]) -> dict[str, Any]:
