@@ -7,7 +7,16 @@ import time
 from types import SimpleNamespace
 
 import tomo.desktop as desktop
-from tomo.desktop import DesktopApi, DesktopApp, DesktopBridge, DesktopApprovalResponder, EventEmitter, Rect, run_desktop, validate_wsl_qt_backend
+from tomo.desktop import (
+    DesktopApi,
+    DesktopApp,
+    DesktopBridge,
+    DesktopApprovalResponder,
+    EventEmitter,
+    Rect,
+    run_desktop,
+    validate_wsl_qt_backend,
+)
 from tomo.gateway import AgentTrace, GatewayReply, ToolCallLifecycleEvent
 from tomo.session_store import create_session
 from tomo.tools import ApprovalRequest
@@ -140,6 +149,7 @@ def test_desktop_api_exposes_only_narrow_bridge_methods():
         "hide_window",
         "poll_events",
         "quit_app",
+        "resize_flyout",
         "resolve_approval",
         "send_message",
         "show_window",
@@ -186,6 +196,30 @@ def test_desktop_bridge_rejects_duplicate_voice_input():
     bridge = DesktopBridge(tomo=FakeTomo(), speech_input=speech)
 
     assert bridge.start_voice_input() == {"ok": False, "error": "Voice input is already listening."}
+
+
+def test_desktop_bridge_resize_flyout_clamps_and_bottom_aligns(monkeypatch):
+    bridge = DesktopBridge(tomo=FakeTomo())
+    window = FakeWindow()
+    bridge.set_window(window)
+    monkeypatch.setattr("tomo.desktop.get_windows_work_area", lambda: Rect(0, 0, 1440, 900))
+
+    assert bridge.resize_flyout(900) == {"ok": True, "height": 700}
+
+    assert window.size == (420, 700)
+    assert window.position == (1008, 188)
+
+
+def test_desktop_bridge_resize_flyout_uses_minimum_height(monkeypatch):
+    bridge = DesktopBridge(tomo=FakeTomo())
+    window = FakeWindow()
+    bridge.set_window(window)
+    monkeypatch.setattr("tomo.desktop.get_windows_work_area", lambda: Rect(0, 0, 1440, 900))
+
+    assert bridge.resize_flyout(20) == {"ok": True, "height": 96}
+
+    assert window.size == (420, 96)
+    assert window.position == (1008, 792)
 
 
 def test_desktop_bridge_voice_final_auto_sends_to_agent(monkeypatch):
@@ -351,8 +385,8 @@ def test_desktop_app_tray_click_shows_bottom_right_flyout(monkeypatch):
 
     app._show_flyout_from_tray()
 
-    assert window.size == (420, 620)
-    assert window.position == (1008, 268)
+    assert window.size == (420, 132)
+    assert window.position == (1008, 756)
     assert window.shown is True
     assert window.restored is True
     assert window.focused is True
@@ -410,7 +444,7 @@ def test_desktop_app_wsl_uses_qt_and_visible_window(monkeypatch, capsys):
 
     class FakeWindow:
         def __init__(self) -> None:
-            self.events = SimpleNamespace(closing=FakeEvents())
+            self.events = SimpleNamespace(closing=FakeEvents(), shown=FakeEvents())
 
     fake_window = FakeWindow()
     def create_window(*args, **kwargs):
@@ -451,7 +485,7 @@ def test_desktop_app_native_windows_starts_hidden_with_default_webview(monkeypat
 
     class FakeWindow:
         def __init__(self) -> None:
-            self.events = SimpleNamespace(closing=FakeEvents())
+            self.events = SimpleNamespace(closing=FakeEvents(), shown=FakeEvents())
 
     fake_window = FakeWindow()
     def create_window(*args, **kwargs):
@@ -464,20 +498,26 @@ def test_desktop_app_native_windows_starts_hidden_with_default_webview(monkeypat
     )
     monkeypatch.setitem(sys.modules, "webview", fake_webview)
     monkeypatch.setattr("tomo.desktop.DesktopApp._start_tray", lambda self: True)
+    monkeypatch.setattr("tomo.desktop.validate_qt_backend", lambda: None)
+    monkeypatch.delenv("QT_API", raising=False)
 
     DesktopApp(bridge=DesktopBridge(tomo=FakeTomo()), wsl_mode=False).run()
 
+    assert os.environ["QT_API"] == "pyside6"
     assert created["kwargs"]["hidden"] is True
     assert created["kwargs"]["width"] == 420
-    assert created["kwargs"]["height"] == 620
+    assert created["kwargs"]["height"] == 132
+    assert created["kwargs"]["min_size"] == (320, 96)
     assert created["kwargs"]["resizable"] is False
     assert created["kwargs"]["frameless"] is True
+    assert created["kwargs"]["transparent"] is True
+    assert created["kwargs"]["background_color"] == "#000000"
     assert created["kwargs"]["easy_drag"] is False
     assert created["kwargs"]["draggable"] is False
     assert created["kwargs"]["maximized"] is False
     assert isinstance(created["kwargs"]["js_api"], DesktopApi)
     assert not isinstance(created["kwargs"]["js_api"], DesktopBridge)
-    assert started == {"called": True, "kwargs": {}}
+    assert started == {"called": True, "kwargs": {"gui": "qt"}}
 
 
 def test_desktop_app_wsl_close_exits_instead_of_hiding():

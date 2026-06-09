@@ -14,10 +14,11 @@ from .gateway import TomoGateway, format_tool_input
 from .speech import WindowsSpeechInput
 from .tools import ApprovalRequest
 
-
 DESKTOP_CHANNEL_ID = "desktop:local"
 FLYOUT_WIDTH = 420
-FLYOUT_HEIGHT = 620
+FLYOUT_INITIAL_HEIGHT = 132
+FLYOUT_MAX_HEIGHT = 700
+FLYOUT_MIN_HEIGHT = 96
 FLYOUT_MARGIN = 12
 VOICE_AUTO_SEND_DELAY_SECONDS = 3.0
 DesktopEvent = dict[str, Any]
@@ -62,7 +63,9 @@ class DesktopApprovalResponder:
         if answers is None:
             return False
         answers.put(bool(approved))
-        self.emit({"type": "approval_resolved", "id": approval_id, "approved": bool(approved)})
+        self.emit(
+            {"type": "approval_resolved", "id": approval_id, "approved": bool(approved)}
+        )
         return True
 
 
@@ -152,12 +155,20 @@ class DesktopBridge:
                         "input": format_tool_input(event.input),
                     }
                 ),
-                on_text_delta=lambda delta: self.emitter({"type": "assistant_delta", "text": delta}),
+                on_text_delta=lambda delta: self.emitter(
+                    {"type": "assistant_delta", "text": delta}
+                ),
             )
         except Exception as exc:  # noqa: BLE001
             self.emitter({"type": "error", "message": str(exc)})
         else:
-            self.emitter({"type": "assistant_message", "text": reply.text, "images": list(reply.images)})
+            self.emitter(
+                {
+                    "type": "assistant_message",
+                    "text": reply.text,
+                    "images": list(reply.images),
+                }
+            )
         finally:
             with self._lock:
                 self.busy = False
@@ -192,6 +203,16 @@ class DesktopBridge:
         self._cancel_pending_voice_send()
         self._handle_voice_state("idle")
         return {"ok": True}
+
+    def resize_flyout(self, height: int | float) -> dict[str, object]:
+        if self.window is None:
+            return {"ok": False, "error": "Window is unavailable."}
+        try:
+            requested_height = int(height)
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "Invalid flyout height."}
+        actual_height = position_flyout_window(self.window, requested_height)
+        return {"ok": True, "height": actual_height}
 
     def show_window(self) -> dict[str, object]:
         if self.window is not None:
@@ -230,8 +251,16 @@ class DesktopBridge:
         self._cancel_pending_voice_send()
         self._pending_voice_text = text
         self._handle_voice_state("sending")
-        self.emitter({"type": "voice_final", "text": text, "send_delay": VOICE_AUTO_SEND_DELAY_SECONDS})
-        self._voice_send_timer = threading.Timer(VOICE_AUTO_SEND_DELAY_SECONDS, self._send_pending_voice_text)
+        self.emitter(
+            {
+                "type": "voice_final",
+                "text": text,
+                "send_delay": VOICE_AUTO_SEND_DELAY_SECONDS,
+            }
+        )
+        self._voice_send_timer = threading.Timer(
+            VOICE_AUTO_SEND_DELAY_SECONDS, self._send_pending_voice_text
+        )
         self._voice_send_timer.daemon = True
         self._voice_send_timer.start()
 
@@ -251,7 +280,12 @@ class DesktopBridge:
         self._handle_voice_state("idle")
         result = self.send_message(text)
         if not result.get("ok"):
-            self.emitter({"type": "voice_error", "message": str(result.get("error", "Unable to send voice input."))})
+            self.emitter(
+                {
+                    "type": "voice_error",
+                    "message": str(result.get("error", "Unable to send voice input.")),
+                }
+            )
             self._handle_voice_state("idle")
 
     def _cancel_pending_voice_send(self) -> None:
@@ -296,6 +330,9 @@ class DesktopApi:
     def cancel_voice_input(self) -> dict[str, object]:
         return self._bridge.cancel_voice_input()
 
+    def resize_flyout(self, height: int | float) -> dict[str, object]:
+        return self._bridge.resize_flyout(height)
+
     def show_window(self) -> dict[str, object]:
         return self._bridge.show_window()
 
@@ -307,16 +344,17 @@ class DesktopApi:
 
 
 class DesktopApp:
-    def __init__(self, bridge: DesktopBridge | None = None, *, wsl_mode: bool | None = None) -> None:
+    def __init__(
+        self, bridge: DesktopBridge | None = None, *, wsl_mode: bool | None = None
+    ) -> None:
         self.bridge = bridge or DesktopBridge()
         self.bridge.quit_callback = self._quit
         self.tray_icon: object | None = None
         self.wsl_mode = is_wsl() if wsl_mode is None else wsl_mode
 
     def run(self) -> None:
-        if self.wsl_mode:
-            os.environ.setdefault("QT_API", "pyside6")
-            validate_wsl_qt_backend()
+        os.environ.setdefault("QT_API", "pyside6")
+        validate_qt_backend()
         import webview
 
         window = webview.create_window(
@@ -324,14 +362,16 @@ class DesktopApp:
             html=DESKTOP_HTML,
             js_api=DesktopApi(self.bridge),
             width=720 if self.wsl_mode else FLYOUT_WIDTH,
-            height=860 if self.wsl_mode else FLYOUT_HEIGHT,
-            min_size=(420, 520),
+            height=860 if self.wsl_mode else FLYOUT_INITIAL_HEIGHT,
+            min_size=(420, 120) if self.wsl_mode else (320, FLYOUT_MIN_HEIGHT),
             hidden=not self.wsl_mode,
             resizable=self.wsl_mode,
             frameless=not self.wsl_mode,
+            transparent=not self.wsl_mode,
             easy_drag=False,
             draggable=False,
             maximized=False,
+            background_color="#000000" if not self.wsl_mode else "#FFFFFF",
             text_select=True,
         )
         self.bridge.set_window(window)
@@ -339,9 +379,11 @@ class DesktopApp:
         if not self.wsl_mode:
             self._start_tray()
         if self.wsl_mode:
-            print("Tomo desktop is running in WSL window mode; close the window to quit.")
+            print(
+                "Tomo desktop is running in WSL window mode; close the window to quit."
+            )
             self.bridge.quitting = True
-        start_kwargs = {"gui": "qt"} if self.wsl_mode else {}
+        start_kwargs = {"gui": "qt"}
         webview.start(**start_kwargs)
 
     def on_window_closing(self, *_: object) -> bool:
@@ -352,7 +394,9 @@ class DesktopApp:
             return True
         self.bridge.quitting = True
         if self.tray_icon is not None:
-            threading.Thread(target=lambda: call_window(self.tray_icon, "stop"), daemon=True).start()
+            threading.Thread(
+                target=lambda: call_window(self.tray_icon, "stop"), daemon=True
+            ).start()
         return True
 
     def _start_tray(self) -> bool:
@@ -364,7 +408,9 @@ class DesktopApp:
                 icon=create_tray_image(),
                 title="Tomo",
                 menu=pystray.Menu(
-                    pystray.MenuItem("Open Tomo", self._show_flyout_from_tray, default=True),
+                    pystray.MenuItem(
+                        "Open Tomo", self._show_flyout_from_tray, default=True
+                    ),
                     pystray.Menu.SEPARATOR,
                     pystray.MenuItem("Quit", self._quit_from_tray),
                 ),
@@ -372,7 +418,9 @@ class DesktopApp:
             self.tray_icon.run_detached()
         except Exception as exc:  # noqa: BLE001
             if self.wsl_mode:
-                print(f"Tomo desktop tray integration is unavailable in this WSL session: {exc}")
+                print(
+                    f"Tomo desktop tray integration is unavailable in this WSL session: {exc}"
+                )
                 return False
             raise
         return True
@@ -384,13 +432,7 @@ class DesktopApp:
     def _position_flyout(self) -> None:
         if self.bridge.window is None:
             return
-        work_area = get_windows_work_area()
-        width = min(FLYOUT_WIDTH, max(320, work_area.right - work_area.left - (FLYOUT_MARGIN * 2)))
-        height = min(FLYOUT_HEIGHT, max(420, work_area.bottom - work_area.top - (FLYOUT_MARGIN * 2)))
-        x = work_area.right - width - FLYOUT_MARGIN
-        y = work_area.bottom - height - FLYOUT_MARGIN
-        resize_window(self.bridge.window, width, height)
-        move_window(self.bridge.window, x, y)
+        position_flyout_window(self.bridge.window, FLYOUT_INITIAL_HEIGHT)
 
     def _quit_from_tray(self, *_: object) -> None:
         self._quit()
@@ -409,7 +451,11 @@ def message_to_dto(message: dict[str, Any]) -> dict[str, Any]:
     content = message.get("content", "")
     if isinstance(content, str):
         return {"role": role, "text": content, "images": []}
-    return {"role": role, "text": structured_content_text(content), "images": structured_content_images(content)}
+    return {
+        "role": role,
+        "text": structured_content_text(content),
+        "images": structured_content_images(content),
+    }
 
 
 def structured_content_text(content: object) -> str:
@@ -455,6 +501,27 @@ def resize_window(window: object, width: int, height: int) -> None:
         method(width, height)
 
 
+def clamp_flyout_height(height: int, work_area: Rect) -> int:
+    available_height = max(
+        FLYOUT_MIN_HEIGHT, work_area.bottom - work_area.top - (FLYOUT_MARGIN * 2)
+    )
+    return min(FLYOUT_MAX_HEIGHT, available_height, max(FLYOUT_MIN_HEIGHT, height))
+
+
+def position_flyout_window(window: object, requested_height: int) -> int:
+    work_area = get_windows_work_area()
+    width = min(
+        FLYOUT_WIDTH,
+        max(320, work_area.right - work_area.left - (FLYOUT_MARGIN * 2)),
+    )
+    height = clamp_flyout_height(requested_height, work_area)
+    x = work_area.right - width - FLYOUT_MARGIN
+    y = work_area.bottom - height - FLYOUT_MARGIN
+    resize_window(window, width, height)
+    move_window(window, x, y)
+    return height
+
+
 def get_windows_work_area() -> Rect:
     if os.name != "nt":
         return Rect(0, 0, 1920, 1080)
@@ -463,7 +530,9 @@ def get_windows_work_area() -> Rect:
 
     work_area = wintypes.RECT()
     spi_getworkarea = 0x0030
-    if ctypes.windll.user32.SystemParametersInfoW(spi_getworkarea, 0, ctypes.byref(work_area), 0):
+    if ctypes.windll.user32.SystemParametersInfoW(
+        spi_getworkarea, 0, ctypes.byref(work_area), 0
+    ):
         return Rect(work_area.left, work_area.top, work_area.right, work_area.bottom)
     return Rect(0, 0, 1920, 1080)
 
@@ -485,7 +554,7 @@ def run_desktop() -> None:
     DesktopApp(wsl_mode=is_wsl()).run()
 
 
-def validate_wsl_qt_backend() -> None:
+def validate_qt_backend() -> None:
     missing: list[str] = []
     for module_name in ("qtpy", "PySide6", "PySide6.QtWebEngineWidgets"):
         try:
@@ -495,11 +564,15 @@ def validate_wsl_qt_backend() -> None:
     if missing:
         details = "\n".join(f"- {item}" for item in missing)
         raise RuntimeError(
-            "Tomo desktop needs the Qt pywebview backend when running inside WSL.\n"
+            "Tomo desktop needs the Qt pywebview backend for transparent flyout rendering.\n"
             "Run `uv sync` to install the Python dependencies. If that still fails, WSL may be missing "
             "Linux GUI system packages required by Qt/WebEngine.\n\n"
             f"Missing backend imports:\n{details}"
         )
+
+
+def validate_wsl_qt_backend() -> None:
+    validate_qt_backend()
 
 
 def is_wsl() -> bool:
@@ -521,55 +594,52 @@ DESKTOP_HTML = f"""
 <title>Tomo</title>
 <style>
 :root {{
-  --bg: #eceee8;
-  --ink: #171a1d;
-  --muted: #66706b;
-  --line: #c9cec5;
-  --panel: #f7f8f3;
-  --user: #123f35;
-  --assistant: #ffffff;
+  --ink: #ffffff;
+  --muted: rgba(23, 26, 29, .62);
+  --line: rgba(23, 26, 29, .14);
+  --glass: rgba(255, 255, 255, .2);
+  --user: rgba(18, 63, 53, .2);
   --accent: #2f8f67;
   --danger: #9b2f2f;
   --tool: #26323a;
 }}
 * {{ box-sizing: border-box; }}
-html, body {{ height: 100%; margin: 0; }}
+html, body {{ min-height: 0; margin: 0; background: transparent; }}
 body {{
-  background: var(--bg);
+  background: transparent;
   color: var(--ink);
   font-family: "Aptos", "Segoe UI", sans-serif;
   font-size: 14px;
   overflow: hidden;
 }}
 button, textarea {{ font: inherit; }}
-.shell {{ height: 100vh; display: grid; grid-template-rows: auto 1fr auto; }}
-header {{
+.shell {{ display: block; }}
+.meta-row {{
   display: grid;
-  grid-template-columns: 1fr auto;
-  gap: 12px;
-  padding: 14px 16px 12px;
-  border-bottom: 1px solid var(--line);
-  background: #f0f2ec;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  padding: 8px 4px 0;
 }}
-.brand {{ display: flex; align-items: baseline; gap: 10px; min-width: 0; }}
-.brand strong {{ font-size: 20px; letter-spacing: 0; }}
-.meta {{ color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
-.state {{ align-self: center; color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .08em; }}
+.meta {{ color: var(--muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+.state {{ color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }}
 .state.busy {{ color: var(--accent); }}
-main {{ min-height: 0; display: grid; grid-template-rows: 1fr auto; }}
-#transcript {{ overflow-y: auto; padding: 18px 16px 20px; }}
+main {{ min-height: 0; display: grid; grid-template-rows: auto auto; }}
+#transcript {{ overflow-y: auto; padding: 18px 16px 14px; }}
 .msg {{ max-width: 88%; margin: 0 0 14px; }}
 .msg.user {{ margin-left: auto; }}
 .bubble {{
   padding: 11px 12px;
   border: 1px solid var(--line);
-  background: var(--assistant);
+  background: var(--glass);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
   border-radius: 8px;
   line-height: 1.45;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }}
-.user .bubble {{ background: var(--user); color: white; border-color: var(--user); }}
+.user .bubble {{ background: var(--user); color: var(--ink); border-color: rgba(18, 63, 53, .2); }}
 .speaker {{ font-size: 11px; color: var(--muted); margin: 0 0 4px 2px; }}
 .user .speaker {{ text-align: right; margin-right: 2px; }}
 .images {{ display: grid; gap: 8px; margin-top: 8px; }}
@@ -604,59 +674,63 @@ main {{ min-height: 0; display: grid; grid-template-rows: 1fr auto; }}
 #voice-text {{ color: var(--ink); overflow-wrap: anywhere; }}
 #voice-text.muted {{ color: var(--muted); }}
 .composer {{
-  border-top: 1px solid var(--line);
-  background: var(--panel);
   padding: 12px;
-  display: grid;
-  grid-template-columns: auto 1fr auto;
-  gap: 10px;
 }}
-textarea {{
+.input-wrap {{ position: relative; }}
+#input {{
+  display: block;
+  width: 100%;
   resize: none;
-  height: 42px;
-  max-height: 140px;
-  padding: 10px 11px;
+  min-height: 44px;
+  max-height: 104px;
+  padding: 11px 92px 11px 12px;
   border: 1px solid var(--line);
   border-radius: 7px;
-  background: white;
+  background: var(--glass);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
   color: var(--ink);
   outline: none;
+  line-height: 20px;
+  overflow-y: hidden;
 }}
 textarea:focus {{ border-color: var(--accent); }}
 button {{
-  border: 1px solid var(--ink);
-  background: var(--ink);
+  background: transparent;
   color: white;
   border-radius: 7px;
   padding: 0 14px;
   min-width: 76px;
   cursor: pointer;
 }}
-button.secondary {{ background: white; color: var(--ink); border-color: var(--line); }}
+button.secondary {{ background: transparent; color: var(--ink); }}
 button.danger {{ background: var(--danger); border-color: var(--danger); }}
 button.icon {{
-  min-width: 42px;
-  width: 42px;
+  min-width: 34px;
+  width: 34px;
+  height: 34px;
   padding: 0;
-  font-weight: 700;
+  display: inline-grid;
+  place-items: center;
 }}
+.input-actions {{
+  position: absolute;
+  right: 6px;
+  bottom: 6px;
+  display: flex;
+  gap: 6px;
+}}
+.input-actions svg {{ width: 17px; height: 17px; stroke-width: 2; }}
 button.icon.listening {{ background: var(--accent); border-color: var(--accent); }}
 button:disabled {{ opacity: .45; cursor: default; }}
-.empty {{ color: var(--muted); text-align: center; margin-top: 22vh; }}
+.empty {{ display: none; }}
 </style>
 </head>
 <body>
 <div class="shell">
-  <header>
-    <div class="brand">
-      <strong>Tomo</strong>
-      <div class="meta" id="meta">{html.escape(settings.model)}</div>
-    </div>
-    <div class="state" id="state">Ready</div>
-  </header>
   <main>
     <div id="transcript"><div class="empty">No messages yet.</div></div>
-    <div>
+    <div id="bottom-panel">
       <div id="tools"></div>
       <div id="approval">
         <div id="approval-title">Approval required</div>
@@ -671,15 +745,35 @@ button:disabled {{ opacity: .45; cursor: default; }}
         <button id="voice-cancel" type="button" class="secondary">Cancel</button>
       </div>
       <form class="composer" id="composer">
-        <button id="voice" class="icon secondary" type="button" title="Voice input" aria-label="Voice input">Mic</button>
-        <textarea id="input" placeholder="Message Tomo"></textarea>
-        <button id="send" type="submit">Send</button>
+        <div class="input-wrap">
+          <textarea id="input" rows="1" placeholder="Message Tomo"></textarea>
+          <div class="input-actions">
+            <button id="voice" class="icon secondary" type="button" title="Voice input" aria-label="Voice input">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true">
+                <path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3Z"></path>
+                <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
+                <path d="M12 19v3"></path>
+              </svg>
+            </button>
+            <button id="send" class="icon" type="submit" title="Send" aria-label="Send">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true">
+                <path d="m22 2-7 20-4-9-9-4Z"></path>
+                <path d="M22 2 11 13"></path>
+              </svg>
+            </button>
+          </div>
+        </div>
+        <div class="meta-row">
+          <div class="meta" id="meta">{html.escape(settings.model)}</div>
+          <div class="state" id="state">Ready</div>
+        </div>
       </form>
     </div>
   </main>
 </div>
 <script>
 const transcript = document.getElementById('transcript');
+const bottomPanel = document.getElementById('bottom-panel');
 const tools = document.getElementById('tools');
 const state = document.getElementById('state');
 const meta = document.getElementById('meta');
@@ -698,6 +792,7 @@ let busy = false;
 let pendingApproval = null;
 let voiceState = 'idle';
 let streamingBubble = null;
+let resizeTimer = null;
 
 function api() {{ return window.pywebview.api; }}
 function setBusy(value) {{
@@ -713,6 +808,24 @@ function clearEmpty() {{
   if (empty) empty.remove();
 }}
 function scrollBottom() {{ transcript.scrollTop = transcript.scrollHeight; }}
+async function resizeFlyout() {{
+  const maxHeight = 700;
+  const naturalTranscriptHeight = Math.max(transcript.scrollHeight, transcript.offsetHeight);
+  const bottomHeight = bottomPanel.offsetHeight;
+  const naturalHeight = Math.ceil(naturalTranscriptHeight + bottomHeight);
+  const targetHeight = Math.max(96, Math.min(maxHeight, naturalHeight));
+  const transcriptHeight = Math.max(0, targetHeight - bottomHeight);
+  transcript.style.maxHeight = `${{transcriptHeight}}px`;
+  transcript.style.overflowY = naturalTranscriptHeight > transcriptHeight ? 'auto' : 'hidden';
+  try {{
+    if (api().resize_flyout) await api().resize_flyout(targetHeight);
+  }} catch (_) {{}}
+  scrollBottom();
+}}
+function scheduleResize() {{
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(resizeFlyout, 0);
+}}
 function addMessage(role, text, images = []) {{
   clearEmpty();
   streamingBubble = null;
@@ -738,12 +851,14 @@ function addMessage(role, text, images = []) {{
   }}
   transcript.appendChild(row);
   scrollBottom();
+  scheduleResize();
   return bubble;
 }}
 function addDelta(text) {{
   if (!streamingBubble) streamingBubble = addMessage('assistant', '');
   streamingBubble.textContent += text;
   scrollBottom();
+  scheduleResize();
 }}
 function addTool(event) {{
   tools.classList.add('visible');
@@ -752,33 +867,39 @@ function addTool(event) {{
   row.textContent = `${{event.name}}: "${{event.input || ''}}"`;
   tools.appendChild(row);
   tools.scrollTop = tools.scrollHeight;
+  scheduleResize();
 }}
 function showApproval(event) {{
   pendingApproval = event.id;
   approvalBody.textContent = `${{event.operation}} ${{event.target}}\\n\\n${{event.reason}}`;
   approval.classList.add('visible');
   setBusy(busy);
+  scheduleResize();
 }}
 function hideApproval() {{
   pendingApproval = null;
   approval.classList.remove('visible');
   setBusy(busy);
+  scheduleResize();
 }}
 function setVoiceState(nextState) {{
   voiceState = nextState || 'idle';
   voice.classList.toggle('listening', voiceState === 'listening');
-  voice.textContent = voiceState === 'listening' ? 'Stop' : 'Mic';
+  voice.title = voiceState === 'listening' ? 'Stop voice input' : 'Voice input';
+  voice.setAttribute('aria-label', voice.title);
   if (voiceState === 'idle') {{
     voicePanel.classList.remove('visible');
     voiceText.textContent = '';
     voiceText.classList.add('muted');
   }}
   setBusy(busy);
+  scheduleResize();
 }}
 function setVoiceText(text, muted = false) {{
   voicePanel.classList.add('visible');
   voiceText.textContent = text;
   voiceText.classList.toggle('muted', muted);
+  scheduleResize();
 }}
 async function handleEvent(event) {{
   if (event.type === 'busy') setBusy(event.busy);
@@ -813,6 +934,7 @@ async function handleEvent(event) {{
   if (event.type === 'voice_partial') setVoiceText(event.text);
   if (event.type === 'voice_final') {{
     input.value = event.text;
+    resizeInput();
     setVoiceText(`Sending in ${{event.send_delay}}s: ${{event.text}}`);
   }}
   if (event.type === 'voice_error') {{
@@ -833,9 +955,23 @@ composer.addEventListener('submit', async (event) => {{
   const text = input.value.trim();
   if (!text) return;
   const result = await api().send_message(text);
-  if (result.ok) input.value = '';
+  if (result.ok) {{
+    input.value = '';
+    resizeInput();
+  }}
   else addMessage('assistant', result.error || 'Unable to send message.');
 }});
+function resizeInput() {{
+  input.style.height = 'auto';
+  const lineHeight = Number.parseFloat(getComputedStyle(input).lineHeight) || 20;
+  const maxHeight = (lineHeight * 4) + 22;
+  input.style.height = `${{Math.min(input.scrollHeight, maxHeight)}}px`;
+  input.style.overflowY = input.scrollHeight > maxHeight ? 'auto' : 'hidden';
+  scheduleResize();
+}}
+input.addEventListener('input', resizeInput);
+new ResizeObserver(scheduleResize).observe(bottomPanel);
+new ResizeObserver(scheduleResize).observe(transcript);
 input.addEventListener('keydown', (event) => {{
   if (event.key === 'Enter' && !event.shiftKey) {{
     event.preventDefault();
@@ -864,6 +1000,8 @@ window.addEventListener('pywebviewready', async () => {{
     for (const message of data.messages) addMessage(message.role === 'user' ? 'user' : 'assistant', message.text, message.images || []);
     setVoiceState(data.voice_state || 'idle');
     setBusy(data.busy);
+    resizeInput();
+    scheduleResize();
   }}
   poll();
 }});
