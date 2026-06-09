@@ -10,6 +10,22 @@ uv run tomo login
 uv run tomo chat
 ```
 
+## Desktop
+
+Launch the background tray chat app:
+
+```bash
+uv run tomo desktop
+```
+
+On native Windows, the desktop app opens from the Windows tray and keeps running when the chat window is closed. In WSL,
+Tomo uses the Qt webview backend and opens the chat window directly; tray integration is best-effort because WSLg does
+not always expose a system tray to Linux apps.
+
+The desktop app supports text chat only.
+Voice activation, wake-word listening, global hotkeys, packaging, and login autostart are intentionally out of scope for
+this first slice.
+
 ## Telegram
 
 Create a bot with BotFather, then run the gateway:
@@ -32,6 +48,7 @@ uv run tomo login
 uv run tomo logout
 uv run tomo auth-status
 uv run tomo chat
+uv run tomo desktop
 uv run tomo telegram start
 uv run tomo telegram stop
 uv run tomo telegram restart

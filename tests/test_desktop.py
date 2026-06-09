@@ -1,0 +1,348 @@
+from __future__ import annotations
+
+import os
+import sys
+import threading
+import time
+from types import SimpleNamespace
+
+from tomo.desktop import DesktopApp, DesktopBridge, DesktopApprovalResponder, EventEmitter, run_desktop, validate_wsl_qt_backend
+from tomo.gateway import AgentTrace, GatewayReply, ToolCallLifecycleEvent
+from tomo.session_store import create_session
+from tomo.tools import ApprovalRequest
+
+
+class FakeTomo:
+    def __init__(self) -> None:
+        self.session = create_session("Desktop")
+        self.messages: list[tuple[str, str]] = []
+
+    def get_session(self, channel_id: str):
+        return self.session
+
+    def send_text_with_events(self, channel_id: str, text: str, on_event=None, on_text_delta=None) -> GatewayReply:
+        self.messages.append((channel_id, text))
+        if on_event is not None:
+            on_event(ToolCallLifecycleEvent(name="web_search", input={"query": text}))
+        if on_text_delta is not None:
+            on_text_delta("streamed ")
+            on_text_delta("reply")
+        return GatewayReply(text="streamed reply", trace=AgentTrace(), images=("https://example.com/image.png",))
+
+
+class SlowTomo(FakeTomo):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def send_text_with_events(self, channel_id: str, text: str, on_event=None, on_text_delta=None) -> GatewayReply:
+        self.started.set()
+        self.release.wait(timeout=1)
+        return GatewayReply(text="done", trace=AgentTrace())
+
+
+class FakeWindow:
+    def __init__(self) -> None:
+        self.hidden = False
+        self.shown = False
+        self.restored = False
+        self.destroyed = False
+
+    def hide(self) -> None:
+        self.hidden = True
+
+    def show(self) -> None:
+        self.shown = True
+
+    def restore(self) -> None:
+        self.restored = True
+
+    def destroy(self) -> None:
+        self.destroyed = True
+
+
+def wait_for_idle(bridge: DesktopBridge) -> None:
+    deadline = time.monotonic() + 2
+    while bridge.busy and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert bridge.busy is False
+
+
+def test_desktop_bridge_bootstrap_returns_session_metadata_and_messages():
+    tomo = FakeTomo()
+    tomo.session.messages.append({"role": "user", "content": "hello"})
+    tomo.session.messages.append({"role": "assistant", "content": "hi"})
+    bridge = DesktopBridge(tomo=tomo)
+
+    data = bridge.bootstrap()
+
+    assert data["ok"] is True
+    assert data["session"]["name"] == "Desktop"
+    assert data["messages"] == [
+        {"role": "user", "text": "hello", "images": []},
+        {"role": "assistant", "text": "hi", "images": []},
+    ]
+
+
+def test_desktop_bridge_send_message_rejects_empty_text():
+    bridge = DesktopBridge(tomo=FakeTomo())
+
+    assert bridge.send_message("   ") == {"ok": False, "error": "Message cannot be empty."}
+
+
+def test_desktop_bridge_send_message_rejects_when_busy():
+    tomo = SlowTomo()
+    bridge = DesktopBridge(tomo=tomo)
+
+    assert bridge.send_message("first") == {"ok": True}
+    assert tomo.started.wait(timeout=1)
+
+    assert bridge.send_message("second") == {"ok": False, "error": "Tomo is still working."}
+
+    tomo.release.set()
+    wait_for_idle(bridge)
+
+
+def test_desktop_bridge_successful_worker_queues_events():
+    bridge = DesktopBridge(tomo=FakeTomo())
+
+    assert bridge.send_message("hello") == {"ok": True}
+    wait_for_idle(bridge)
+
+    events = bridge.poll_events()
+    assert events[0] == {"type": "busy", "busy": True}
+    assert events[1] == {"type": "user_message", "text": "hello"}
+    assert {"type": "assistant_delta", "text": "streamed "} in events
+    assert {"type": "assistant_delta", "text": "reply"} in events
+    assert {
+        "type": "assistant_message",
+        "text": "streamed reply",
+        "images": ["https://example.com/image.png"],
+    } in events
+    assert events[-1] == {"type": "busy", "busy": False}
+
+
+def test_desktop_bridge_tool_callback_queues_tool_event():
+    bridge = DesktopBridge(tomo=FakeTomo())
+
+    bridge.send_message("hello")
+    wait_for_idle(bridge)
+
+    assert {"type": "tool_event", "name": "web_search", "input": '{"query":"hello"}'} in bridge.poll_events()
+
+
+def test_desktop_approval_responder_resolves_approve():
+    emitter = EventEmitter()
+    responder = DesktopApprovalResponder(emitter)
+    result: dict[str, bool] = {}
+
+    thread = threading.Thread(
+        target=lambda: result.setdefault(
+            "approved",
+            responder.request_approval("desktop:local", ApprovalRequest("write", "tool call", "needs approval")),
+        )
+    )
+    thread.start()
+    deadline = time.monotonic() + 1
+    approval_id = None
+    while approval_id is None and time.monotonic() < deadline:
+        for event in emitter.drain():
+            if event["type"] == "approval_request":
+                approval_id = event["id"]
+        time.sleep(0.01)
+    assert isinstance(approval_id, str)
+
+    assert responder.resolve(approval_id, True) is True
+    thread.join(timeout=1)
+
+    assert result["approved"] is True
+
+
+def test_desktop_approval_responder_resolves_deny():
+    emitter = EventEmitter()
+    responder = DesktopApprovalResponder(emitter)
+    result: dict[str, bool] = {}
+
+    thread = threading.Thread(
+        target=lambda: result.setdefault(
+            "approved",
+            responder.request_approval("desktop:local", ApprovalRequest("write", "tool call", "needs approval")),
+        )
+    )
+    thread.start()
+    deadline = time.monotonic() + 1
+    approval_id = None
+    while approval_id is None and time.monotonic() < deadline:
+        for event in emitter.drain():
+            if event["type"] == "approval_request":
+                approval_id = event["id"]
+        time.sleep(0.01)
+    assert isinstance(approval_id, str)
+
+    assert responder.resolve(approval_id, False) is True
+    thread.join(timeout=1)
+
+    assert result["approved"] is False
+
+
+def test_desktop_app_close_hides_window_and_cancels_close():
+    bridge = DesktopBridge(tomo=FakeTomo())
+    window = FakeWindow()
+    bridge.set_window(window)
+    app = DesktopApp(bridge=bridge, wsl_mode=False)
+
+    assert app.on_window_closing() is False
+    assert window.hidden is True
+
+
+def test_desktop_app_close_allows_explicit_quit():
+    bridge = DesktopBridge(tomo=FakeTomo())
+    window = FakeWindow()
+    bridge.set_window(window)
+    bridge.quitting = True
+    app = DesktopApp(bridge=bridge, wsl_mode=False)
+
+    assert app.on_window_closing() is True
+    assert window.hidden is False
+
+
+def test_cli_desktop_refuses_when_not_logged_in(monkeypatch, capsys):
+    from tomo import cli
+
+    monkeypatch.setattr(sys, "argv", ["tomo", "desktop"])
+    monkeypatch.setattr(cli, "load_tokens", lambda: None)
+    calls = []
+    monkeypatch.setattr(cli, "run_desktop", lambda: calls.append("desktop"))
+
+    cli.main()
+
+    assert "Not logged in. Run `uv run tomo login` first." in capsys.readouterr().out
+    assert calls == []
+
+
+def test_cli_desktop_calls_run_desktop_when_logged_in(monkeypatch):
+    from tomo import cli
+
+    calls = []
+    monkeypatch.setattr(sys, "argv", ["tomo", "desktop"])
+    monkeypatch.setattr(cli, "load_tokens", lambda: object())
+    monkeypatch.setattr(cli, "run_desktop", lambda: calls.append("desktop"))
+
+    cli.main()
+
+    assert calls == ["desktop"]
+
+
+def test_run_desktop_starts_app_in_wsl_mode(monkeypatch):
+    calls = []
+    monkeypatch.setattr("tomo.desktop.is_wsl", lambda: True)
+    monkeypatch.setattr("tomo.desktop.DesktopApp.run", lambda self: calls.append(self.wsl_mode))
+
+    run_desktop()
+
+    assert calls == [True]
+
+
+def test_desktop_app_wsl_uses_qt_and_visible_window(monkeypatch, capsys):
+    created = {}
+    started = {}
+    tray_calls = []
+
+    class FakeEvents:
+        def __init__(self) -> None:
+            self.handlers = []
+
+        def __iadd__(self, handler):
+            self.handlers.append(handler)
+            return self
+
+    class FakeWindow:
+        def __init__(self) -> None:
+            self.events = SimpleNamespace(closing=FakeEvents())
+
+    fake_window = FakeWindow()
+    def create_window(*args, **kwargs):
+        created["kwargs"] = kwargs
+        return fake_window
+
+    fake_webview = SimpleNamespace(
+        create_window=create_window,
+        start=lambda **kwargs: started.update(kwargs),
+    )
+    monkeypatch.setitem(sys.modules, "webview", fake_webview)
+    monkeypatch.setattr("tomo.desktop.DesktopApp._start_tray", lambda self: tray_calls.append("tray"))
+    monkeypatch.setattr("tomo.desktop.validate_wsl_qt_backend", lambda: None)
+    monkeypatch.delenv("QT_API", raising=False)
+
+    DesktopApp(bridge=DesktopBridge(tomo=FakeTomo()), wsl_mode=True).run()
+
+    assert os.environ["QT_API"] == "pyside6"
+    assert created["kwargs"]["hidden"] is False
+    assert started == {"gui": "qt"}
+    assert tray_calls == []
+    assert "WSL window mode" in capsys.readouterr().out
+
+
+def test_desktop_app_native_windows_starts_hidden_with_default_webview(monkeypatch):
+    created = {}
+    started = {"called": False}
+
+    class FakeEvents:
+        def __init__(self) -> None:
+            self.handlers = []
+
+        def __iadd__(self, handler):
+            self.handlers.append(handler)
+            return self
+
+    class FakeWindow:
+        def __init__(self) -> None:
+            self.events = SimpleNamespace(closing=FakeEvents())
+
+    fake_window = FakeWindow()
+    def create_window(*args, **kwargs):
+        created["kwargs"] = kwargs
+        return fake_window
+
+    fake_webview = SimpleNamespace(
+        create_window=create_window,
+        start=lambda **kwargs: started.update({"called": True, "kwargs": kwargs}),
+    )
+    monkeypatch.setitem(sys.modules, "webview", fake_webview)
+    monkeypatch.setattr("tomo.desktop.DesktopApp._start_tray", lambda self: True)
+
+    DesktopApp(bridge=DesktopBridge(tomo=FakeTomo()), wsl_mode=False).run()
+
+    assert created["kwargs"]["hidden"] is True
+    assert started == {"called": True, "kwargs": {}}
+
+
+def test_desktop_app_wsl_close_exits_instead_of_hiding():
+    bridge = DesktopBridge(tomo=FakeTomo())
+    window = FakeWindow()
+    bridge.set_window(window)
+    app = DesktopApp(bridge=bridge, wsl_mode=True)
+
+    assert app.on_window_closing() is True
+    assert bridge.quitting is True
+    assert window.hidden is False
+
+
+def test_validate_wsl_qt_backend_reports_missing_import(monkeypatch):
+    real_import = __import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "qtpy":
+            raise ModuleNotFoundError("No module named 'qtpy'")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.__import__", fake_import)
+
+    try:
+        validate_wsl_qt_backend()
+    except RuntimeError as exc:
+        assert "Run `uv sync`" in str(exc)
+        assert "qtpy" in str(exc)
+    else:
+        raise AssertionError("validate_wsl_qt_backend should fail when qtpy is missing")

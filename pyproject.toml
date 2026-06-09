@@ -9,9 +9,14 @@ dependencies = [
     "langchain>=1.0.0",
     "langgraph>=1.2.4",
     "langchain-xai>=1.0.0",
+    "pillow>=10.0.0",
     "playwright>=1.56.0",
     "prompt-toolkit>=3.0.52",
+    "pyside6>=6.9.0",
+    "pystray>=0.19.5",
+    "pywebview>=6.2.0",
     "pydantic-settings>=2.0.0",
+    "qtpy>=2.4.3",
     "rank-bm25>=0.2.2",
 ]
 
