@@ -18,6 +18,9 @@ dependencies = [
     "pydantic-settings>=2.0.0",
     "qtpy>=2.4.3",
     "rank-bm25>=0.2.2",
+    "winrt-windows-foundation>=3.2.1",
+    "winrt-windows-foundation-collections>=3.2.1",
+    "winrt-windows-media-speechrecognition>=3.2.1",
 ]
 
 [project.scripts]

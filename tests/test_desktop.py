@@ -6,6 +6,7 @@ import threading
 import time
 from types import SimpleNamespace
 
+import tomo.desktop as desktop
 from tomo.desktop import DesktopApi, DesktopApp, DesktopBridge, DesktopApprovalResponder, EventEmitter, Rect, run_desktop, validate_wsl_qt_backend
 from tomo.gateway import AgentTrace, GatewayReply, ToolCallLifecycleEvent
 from tomo.session_store import create_session
@@ -82,6 +83,28 @@ class FakeTrayIcon:
         self.stopped = True
 
 
+class FakeSpeechInput:
+    def __init__(self, start_result: bool = True) -> None:
+        self.start_result = start_result
+        self.started = False
+        self.stopped = False
+        self.canceled = False
+        self.shutdown_called = False
+
+    def start(self) -> bool:
+        self.started = True
+        return self.start_result
+
+    def stop(self) -> None:
+        self.stopped = True
+
+    def cancel(self) -> None:
+        self.canceled = True
+
+    def shutdown(self) -> None:
+        self.shutdown_called = True
+
+
 def wait_for_idle(bridge: DesktopBridge) -> None:
     deadline = time.monotonic() + 2
     while bridge.busy and time.monotonic() < deadline:
@@ -113,12 +136,15 @@ def test_desktop_api_exposes_only_narrow_bridge_methods():
 
     assert public_names == [
         "bootstrap",
+        "cancel_voice_input",
         "hide_window",
         "poll_events",
         "quit_app",
         "resolve_approval",
         "send_message",
         "show_window",
+        "start_voice_input",
+        "stop_voice_input",
     ]
     assert api.bootstrap()["ok"] is True
     assert api.poll_events() == []
@@ -141,6 +167,57 @@ def test_desktop_bridge_send_message_rejects_when_busy():
 
     tomo.release.set()
     wait_for_idle(bridge)
+
+
+def test_desktop_bridge_start_and_cancel_voice_input():
+    speech = FakeSpeechInput()
+    bridge = DesktopBridge(tomo=FakeTomo(), speech_input=speech)
+
+    assert bridge.start_voice_input() == {"ok": True}
+    assert speech.started is True
+
+    assert bridge.cancel_voice_input() == {"ok": True}
+    assert speech.canceled is True
+    assert {"type": "voice_state", "state": "idle"} in bridge.poll_events()
+
+
+def test_desktop_bridge_rejects_duplicate_voice_input():
+    speech = FakeSpeechInput(start_result=False)
+    bridge = DesktopBridge(tomo=FakeTomo(), speech_input=speech)
+
+    assert bridge.start_voice_input() == {"ok": False, "error": "Voice input is already listening."}
+
+
+def test_desktop_bridge_voice_final_auto_sends_to_agent(monkeypatch):
+    monkeypatch.setattr(desktop, "VOICE_AUTO_SEND_DELAY_SECONDS", 0.01)
+    tomo = FakeTomo()
+    bridge = DesktopBridge(tomo=tomo, speech_input=FakeSpeechInput())
+
+    bridge._handle_voice_final(" send this ")
+    wait_for_idle(bridge)
+
+    deadline = time.monotonic() + 1
+    while not tomo.messages and time.monotonic() < deadline:
+        time.sleep(0.01)
+    wait_for_idle(bridge)
+
+    assert tomo.messages == [("desktop:local", "send this")]
+    events = bridge.poll_events()
+    assert {"type": "voice_state", "state": "sending"} in events
+    assert {"type": "voice_final", "text": "send this", "send_delay": 0.01} in events
+    assert {"type": "user_message", "text": "send this"} in events
+
+
+def test_desktop_bridge_cancel_voice_input_prevents_pending_auto_send(monkeypatch):
+    monkeypatch.setattr(desktop, "VOICE_AUTO_SEND_DELAY_SECONDS", 0.05)
+    tomo = FakeTomo()
+    bridge = DesktopBridge(tomo=tomo, speech_input=FakeSpeechInput())
+
+    bridge._handle_voice_final("do not send")
+    bridge.cancel_voice_input()
+    time.sleep(0.08)
+
+    assert tomo.messages == []
 
 
 def test_desktop_bridge_successful_worker_queues_events():
@@ -252,6 +329,8 @@ def test_desktop_app_quit_destroys_window_and_stops_tray():
     window = FakeWindow()
     tray = FakeTrayIcon()
     bridge.set_window(window)
+    speech = FakeSpeechInput()
+    bridge.speech_input = speech
     app = DesktopApp(bridge=bridge, wsl_mode=False)
     app.tray_icon = tray
 
@@ -260,6 +339,7 @@ def test_desktop_app_quit_destroys_window_and_stops_tray():
     assert bridge.quitting is True
     assert window.destroyed is True
     assert tray.stopped is True
+    assert speech.shutdown_called is True
 
 
 def test_desktop_app_tray_click_shows_bottom_right_flyout(monkeypatch):

@@ -11,6 +11,7 @@ from uuid import uuid4
 
 from .config import settings
 from .gateway import TomoGateway, format_tool_input
+from .speech import WindowsSpeechInput
 from .tools import ApprovalRequest
 
 
@@ -18,6 +19,7 @@ DESKTOP_CHANNEL_ID = "desktop:local"
 FLYOUT_WIDTH = 420
 FLYOUT_HEIGHT = 620
 FLYOUT_MARGIN = 12
+VOICE_AUTO_SEND_DELAY_SECONDS = 3.0
 DesktopEvent = dict[str, Any]
 
 
@@ -81,15 +83,29 @@ class EventEmitter:
 
 
 class DesktopBridge:
-    def __init__(self, tomo: TomoGateway | None = None, channel_id: str = DESKTOP_CHANNEL_ID) -> None:
+    def __init__(
+        self,
+        tomo: TomoGateway | None = None,
+        channel_id: str = DESKTOP_CHANNEL_ID,
+        speech_input: object | None = None,
+    ) -> None:
         self.channel_id = channel_id
         self.emitter = EventEmitter()
         self.responder = DesktopApprovalResponder(self.emitter)
         self.tomo = tomo or TomoGateway(responder=self.responder)
         self.busy = False
+        self.voice_state = "idle"
         self.quitting = False
         self.window: object | None = None
         self.quit_callback: Callable[[], None] | None = None
+        self.speech_input = speech_input or WindowsSpeechInput(
+            on_state=self._handle_voice_state,
+            on_partial=self._handle_voice_partial,
+            on_final=self._handle_voice_final,
+            on_error=self._handle_voice_error,
+        )
+        self._voice_send_timer: threading.Timer | None = None
+        self._pending_voice_text = ""
         self._lock = threading.Lock()
 
     def set_window(self, window: object) -> None:
@@ -104,6 +120,7 @@ class DesktopBridge:
             "session": asdict(session.metadata),
             "messages": [message_to_dto(message) for message in session.messages],
             "busy": self.busy,
+            "voice_state": self.voice_state,
         }
 
     def poll_events(self) -> list[DesktopEvent]:
@@ -151,6 +168,31 @@ class DesktopBridge:
             return {"ok": False, "error": "No pending approval."}
         return {"ok": True}
 
+    def start_voice_input(self) -> dict[str, object]:
+        self._cancel_pending_voice_send()
+        start = getattr(self.speech_input, "start", None)
+        if not callable(start):
+            return {"ok": False, "error": "Voice input is unavailable."}
+        if not start():
+            return {"ok": False, "error": "Voice input is already listening."}
+        return {"ok": True}
+
+    def stop_voice_input(self) -> dict[str, object]:
+        stop = getattr(self.speech_input, "stop", None)
+        if callable(stop):
+            stop()
+        self._cancel_pending_voice_send()
+        self._handle_voice_state("idle")
+        return {"ok": True}
+
+    def cancel_voice_input(self) -> dict[str, object]:
+        cancel = getattr(self.speech_input, "cancel", None)
+        if callable(cancel):
+            cancel()
+        self._cancel_pending_voice_send()
+        self._handle_voice_state("idle")
+        return {"ok": True}
+
     def show_window(self) -> dict[str, object]:
         if self.window is not None:
             call_window(self.window, "show")
@@ -165,12 +207,66 @@ class DesktopBridge:
 
     def quit_app(self) -> dict[str, object]:
         self.quitting = True
+        self._shutdown_speech_input()
         if self.quit_callback is not None:
             self.quit_callback()
             return {"ok": True}
         if self.window is not None:
             call_window(self.window, "destroy")
         return {"ok": True}
+
+    def _handle_voice_state(self, state: str) -> None:
+        self.voice_state = state
+        self.emitter({"type": "voice_state", "state": state})
+
+    def _handle_voice_partial(self, text: str) -> None:
+        self.emitter({"type": "voice_partial", "text": text})
+
+    def _handle_voice_final(self, text: str) -> None:
+        text = text.strip()
+        if not text:
+            self._handle_voice_state("idle")
+            return
+        self._cancel_pending_voice_send()
+        self._pending_voice_text = text
+        self._handle_voice_state("sending")
+        self.emitter({"type": "voice_final", "text": text, "send_delay": VOICE_AUTO_SEND_DELAY_SECONDS})
+        self._voice_send_timer = threading.Timer(VOICE_AUTO_SEND_DELAY_SECONDS, self._send_pending_voice_text)
+        self._voice_send_timer.daemon = True
+        self._voice_send_timer.start()
+
+    def _handle_voice_error(self, message: str) -> None:
+        self._cancel_pending_voice_send()
+        self.voice_state = "idle"
+        self.emitter({"type": "voice_error", "message": message})
+        self.emitter({"type": "voice_state", "state": "idle"})
+
+    def _send_pending_voice_text(self) -> None:
+        with self._lock:
+            text = self._pending_voice_text
+            self._pending_voice_text = ""
+            self._voice_send_timer = None
+        if not text:
+            return
+        self._handle_voice_state("idle")
+        result = self.send_message(text)
+        if not result.get("ok"):
+            self.emitter({"type": "voice_error", "message": str(result.get("error", "Unable to send voice input."))})
+            self._handle_voice_state("idle")
+
+    def _cancel_pending_voice_send(self) -> None:
+        with self._lock:
+            timer = self._voice_send_timer
+            self._voice_send_timer = None
+            self._pending_voice_text = ""
+        if timer is not None:
+            timer.cancel()
+
+    def _shutdown_speech_input(self) -> None:
+        self._cancel_pending_voice_send()
+        shutdown = getattr(self.speech_input, "shutdown", None)
+        if callable(shutdown):
+            shutdown()
 
 
 class DesktopApi:
@@ -190,6 +286,15 @@ class DesktopApi:
 
     def resolve_approval(self, approval_id: str, approved: bool) -> dict[str, object]:
         return self._bridge.resolve_approval(approval_id, approved)
+
+    def start_voice_input(self) -> dict[str, object]:
+        return self._bridge.start_voice_input()
+
+    def stop_voice_input(self) -> dict[str, object]:
+        return self._bridge.stop_voice_input()
+
+    def cancel_voice_input(self) -> dict[str, object]:
+        return self._bridge.cancel_voice_input()
 
     def show_window(self) -> dict[str, object]:
         return self._bridge.show_window()
@@ -292,6 +397,7 @@ class DesktopApp:
 
     def _quit(self) -> None:
         self.bridge.quitting = True
+        self.bridge._shutdown_speech_input()
         if self.bridge.window is not None:
             call_window(self.bridge.window, "destroy")
         if self.tray_icon is not None:
@@ -485,12 +591,24 @@ main {{ min-height: 0; display: grid; grid-template-rows: 1fr auto; }}
 #approval-title {{ font-weight: 700; margin-bottom: 5px; }}
 #approval-body {{ color: #4b4430; white-space: pre-wrap; overflow-wrap: anywhere; }}
 .approval-actions {{ display: flex; gap: 8px; margin-top: 10px; }}
+#voice-panel {{
+  display: none;
+  border-top: 1px solid var(--line);
+  background: #edf5f0;
+  padding: 10px 12px;
+  gap: 8px;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+}}
+#voice-panel.visible {{ display: grid; }}
+#voice-text {{ color: var(--ink); overflow-wrap: anywhere; }}
+#voice-text.muted {{ color: var(--muted); }}
 .composer {{
   border-top: 1px solid var(--line);
   background: var(--panel);
   padding: 12px;
   display: grid;
-  grid-template-columns: 1fr auto;
+  grid-template-columns: auto 1fr auto;
   gap: 10px;
 }}
 textarea {{
@@ -516,6 +634,13 @@ button {{
 }}
 button.secondary {{ background: white; color: var(--ink); border-color: var(--line); }}
 button.danger {{ background: var(--danger); border-color: var(--danger); }}
+button.icon {{
+  min-width: 42px;
+  width: 42px;
+  padding: 0;
+  font-weight: 700;
+}}
+button.icon.listening {{ background: var(--accent); border-color: var(--accent); }}
 button:disabled {{ opacity: .45; cursor: default; }}
 .empty {{ color: var(--muted); text-align: center; margin-top: 22vh; }}
 </style>
@@ -541,7 +666,12 @@ button:disabled {{ opacity: .45; cursor: default; }}
           <button id="deny" class="danger">Deny</button>
         </div>
       </div>
+      <div id="voice-panel">
+        <div id="voice-text" class="muted"></div>
+        <button id="voice-cancel" type="button" class="secondary">Cancel</button>
+      </div>
       <form class="composer" id="composer">
+        <button id="voice" class="icon secondary" type="button" title="Voice input" aria-label="Voice input">Mic</button>
         <textarea id="input" placeholder="Message Tomo"></textarea>
         <button id="send" type="submit">Send</button>
       </form>
@@ -560,17 +690,23 @@ const approval = document.getElementById('approval');
 const approvalBody = document.getElementById('approval-body');
 const approve = document.getElementById('approve');
 const deny = document.getElementById('deny');
+const voice = document.getElementById('voice');
+const voicePanel = document.getElementById('voice-panel');
+const voiceText = document.getElementById('voice-text');
+const voiceCancel = document.getElementById('voice-cancel');
 let busy = false;
 let pendingApproval = null;
+let voiceState = 'idle';
 let streamingBubble = null;
 
 function api() {{ return window.pywebview.api; }}
 function setBusy(value) {{
   busy = value;
-  state.textContent = value ? 'Working' : pendingApproval ? 'Approval' : 'Ready';
-  state.classList.toggle('busy', value || !!pendingApproval);
+  state.textContent = value ? 'Working' : pendingApproval ? 'Approval' : voiceState === 'listening' ? 'Listening' : voiceState === 'sending' ? 'Sending' : 'Ready';
+  state.classList.toggle('busy', value || !!pendingApproval || voiceState !== 'idle');
   send.disabled = value || !!pendingApproval;
   input.disabled = !!pendingApproval;
+  voice.disabled = value || !!pendingApproval || voiceState === 'sending';
 }}
 function clearEmpty() {{
   const empty = transcript.querySelector('.empty');
@@ -628,6 +764,22 @@ function hideApproval() {{
   approval.classList.remove('visible');
   setBusy(busy);
 }}
+function setVoiceState(nextState) {{
+  voiceState = nextState || 'idle';
+  voice.classList.toggle('listening', voiceState === 'listening');
+  voice.textContent = voiceState === 'listening' ? 'Stop' : 'Mic';
+  if (voiceState === 'idle') {{
+    voicePanel.classList.remove('visible');
+    voiceText.textContent = '';
+    voiceText.classList.add('muted');
+  }}
+  setBusy(busy);
+}}
+function setVoiceText(text, muted = false) {{
+  voicePanel.classList.add('visible');
+  voiceText.textContent = text;
+  voiceText.classList.toggle('muted', muted);
+}}
 async function handleEvent(event) {{
   if (event.type === 'busy') setBusy(event.busy);
   if (event.type === 'user_message') addMessage('user', event.text);
@@ -654,6 +806,19 @@ async function handleEvent(event) {{
   if (event.type === 'approval_request') showApproval(event);
   if (event.type === 'approval_resolved') hideApproval();
   if (event.type === 'error') addMessage('assistant', `Error: ${{event.message}}`);
+  if (event.type === 'voice_state') {{
+    setVoiceState(event.state);
+    if (event.state === 'listening') setVoiceText('Listening...', true);
+  }}
+  if (event.type === 'voice_partial') setVoiceText(event.text);
+  if (event.type === 'voice_final') {{
+    input.value = event.text;
+    setVoiceText(`Sending in ${{event.send_delay}}s: ${{event.text}}`);
+  }}
+  if (event.type === 'voice_error') {{
+    setVoiceState('idle');
+    addMessage('assistant', `Voice input error: ${{event.message}}`);
+  }}
 }}
 async function poll() {{
   try {{
@@ -677,6 +842,19 @@ input.addEventListener('keydown', (event) => {{
     composer.requestSubmit();
   }}
 }});
+voice.addEventListener('click', async () => {{
+  if (voiceState === 'listening') {{
+    await api().cancel_voice_input();
+    setVoiceState('idle');
+    return;
+  }}
+  const result = await api().start_voice_input();
+  if (!result.ok) addMessage('assistant', result.error || 'Unable to start voice input.');
+}});
+voiceCancel.addEventListener('click', async () => {{
+  await api().cancel_voice_input();
+  setVoiceState('idle');
+}});
 approve.addEventListener('click', () => pendingApproval && api().resolve_approval(pendingApproval, true));
 deny.addEventListener('click', () => pendingApproval && api().resolve_approval(pendingApproval, false));
 window.addEventListener('pywebviewready', async () => {{
@@ -684,6 +862,7 @@ window.addEventListener('pywebviewready', async () => {{
   if (data.ok) {{
     meta.textContent = `${{data.model}} - ${{data.session.name}} - ${{data.session.id.slice(0, 8)}}`;
     for (const message of data.messages) addMessage(message.role === 'user' ? 'user' : 'assistant', message.text, message.images || []);
+    setVoiceState(data.voice_state || 'idle');
     setBusy(data.busy);
   }}
   poll();
