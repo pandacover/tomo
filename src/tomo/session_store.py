@@ -3,9 +3,10 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass, field
 from typing import Any
-from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
+
+from .tools import now_iso
 
 
 SESSIONS_DIR = Path("sessions")
@@ -23,10 +24,6 @@ class SessionMetadata:
 class ChatSession:
     metadata: SessionMetadata
     messages: list[dict[str, Any]] = field(default_factory=list)
-
-
-def now_iso() -> str:
-    return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def create_session(name: str | None = None) -> ChatSession:

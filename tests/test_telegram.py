@@ -7,6 +7,7 @@ import time
 
 from tomo.gateway import AgentTrace, GatewayReply, ToolCallLifecycleEvent
 from tomo.config import settings
+from tomo.slash_commands import command_argument
 from tomo.telegram import (
     TelegramGateway,
     YOLO_ENABLED_MESSAGE,
@@ -19,7 +20,6 @@ from tomo.telegram import (
     start_telegram,
     stop_telegram,
     telegram_command,
-    telegram_command_argument,
     telegram_log_path,
     telegram_pid_path,
     write_pid,
@@ -130,7 +130,7 @@ def test_start_telegram_spawns_background_gateway(tmp_path, monkeypatch, capsys)
         pid = 12345
 
     monkeypatch.setattr(settings, "data_dir", tmp_path)
-    monkeypatch.setattr("tomo.telegram.load_tokens", lambda: object())
+    monkeypatch.setattr("tomo.token_store.load_tokens", lambda: object())
     monkeypatch.setattr(
         "tomo.telegram.resolved_telegram_config",
         lambda: TelegramConfig(bot_token="token", allowed_chat_ids=[1]),
@@ -152,7 +152,7 @@ def test_start_telegram_spawns_background_gateway(tmp_path, monkeypatch, capsys)
 
 def test_start_telegram_refuses_when_gateway_is_already_running(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(settings, "data_dir", tmp_path)
-    monkeypatch.setattr("tomo.telegram.load_tokens", lambda: object())
+    monkeypatch.setattr("tomo.token_store.load_tokens", lambda: object())
     monkeypatch.setattr(
         "tomo.telegram.resolved_telegram_config",
         lambda: TelegramConfig(bot_token="token", allowed_chat_ids=[]),
@@ -285,10 +285,10 @@ def test_telegram_command_normalizes_bot_qualified_commands():
     assert telegram_command("hello") is None
 
 
-def test_telegram_command_argument_reads_first_argument():
-    assert telegram_command_argument("/yolo enable") == "enable"
-    assert telegram_command_argument("/yolo@tomo_bot DISABLE") == "disable"
-    assert telegram_command_argument("/yolo") is None
+def test_command_argument_reads_first_argument():
+    assert command_argument("/yolo enable") == "enable"
+    assert command_argument("/yolo@tomo_bot DISABLE") == "disable"
+    assert command_argument("/yolo") is None
 
 
 def test_telegram_gateway_rejects_unallowed_chat():

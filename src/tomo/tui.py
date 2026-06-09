@@ -27,8 +27,8 @@ from .reasoning import (
 )
 from .gateway import ToolEventEmitter, approval_request_from_actions, extract_agent_trace, extract_interrupts, invoke_agent_streaming
 from .session_store import ChatSession, create_session, list_sessions, load_session, save_session
-from .slash_commands import SlashCommandCompleter, slash_prefix, status_hint, unrecognized_message
-from .token_store import load_tokens
+from .slash_commands import SlashCommandCompleter, command_argument, slash_prefix, status_hint, unrecognized_message
+from .token_store import ensure_logged_in, load_tokens
 from .tools import ApprovalRequest
 
 
@@ -415,8 +415,7 @@ class PromptChat:
 
 
 def run_chat() -> None:
-    if load_tokens() is None:
-        print("Not logged in. Run `uv run tomo login` first.")
+    if not ensure_logged_in():
         return
     session = create_session()
     save_session(session)
@@ -427,10 +426,3 @@ def run_chat() -> None:
         reasoning_effort=effort,
     )
     chat.run()
-
-
-def command_argument(text: str) -> str | None:
-    parts = text.strip().split(maxsplit=1)
-    if len(parts) < 2:
-        return None
-    return parts[1].strip().lower() or None

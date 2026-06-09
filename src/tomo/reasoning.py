@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
@@ -17,6 +18,7 @@ def preferences_path() -> Path:
     return settings.data_dir / PREFERENCES_FILENAME
 
 
+@lru_cache(maxsize=1)
 def load_preferences() -> dict[str, object]:
     path = preferences_path()
     if not path.is_file():
@@ -34,6 +36,7 @@ def save_preferences(**updates: object) -> None:
     path = preferences_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    load_preferences.cache_clear()
 
 
 def effective_reasoning_effort() -> str:

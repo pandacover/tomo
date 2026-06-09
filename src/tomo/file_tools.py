@@ -5,27 +5,10 @@ from pathlib import Path
 
 from langchain_core.tools import tool
 
+from .tools import _is_relative_to, _resolve_path, _workspace
+
 
 MAX_FILE_READ_CHARS = 20_000
-
-
-def _workspace() -> Path:
-    return Path.cwd().resolve()
-
-
-def _resolve_path(path: str) -> Path:
-    raw = Path(path).expanduser()
-    if raw.is_absolute():
-        return raw.resolve()
-    return (_workspace() / raw).resolve()
-
-
-def _is_relative_to(path: Path, parent: Path) -> bool:
-    try:
-        path.relative_to(parent)
-        return True
-    except ValueError:
-        return False
 
 
 def _path_error(path: Path) -> str | None:

@@ -6,6 +6,7 @@ import queue
 import threading
 from collections.abc import Callable
 from dataclasses import asdict
+from functools import cache
 from typing import Any, NamedTuple
 from uuid import uuid4
 
@@ -690,6 +691,7 @@ def validate_wsl_qt_backend() -> None:
     validate_qt_backend()
 
 
+@cache
 def is_wsl() -> bool:
     if os.environ.get("WSL_DISTRO_NAME") or os.environ.get("WSL_INTEROP"):
         return True

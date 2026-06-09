@@ -23,10 +23,10 @@ from .reasoning import (
     parse_reasoning_command_args,
     reasoning_usage_message,
 )
-from .slash_commands import slash_prefix, telegram_bot_commands, unrecognized_message
+from .slash_commands import command_argument, slash_prefix, telegram_bot_commands, unrecognized_message
 from .session_store import ChatSession
 from .telegram_config import parse_allowed_chat_ids, resolved_telegram_config
-from .token_store import load_tokens
+from .token_store import ensure_logged_in, load_tokens
 from .tools import ApprovalRequest
 
 
@@ -294,7 +294,7 @@ class TelegramGateway:
         self.send_message(chat_id, "Reply /approve or /deny.")
 
     def handle_yolo_command(self, chat_id: str, text: str) -> None:
-        argument = telegram_command_argument(text)
+        argument = command_argument(text)
         if argument is None:
             if chat_id in self.yolo_chats:
                 self.send_message(chat_id, YOLO_STATUS_ENABLED)
@@ -317,7 +317,7 @@ class TelegramGateway:
         self.send_message(chat_id, "Usage: /yolo enable, /yolo disable, or /yolo.")
 
     def handle_debug_tool_command(self, chat_id: str, text: str) -> None:
-        argument = telegram_command_argument(text)
+        argument = command_argument(text)
         if argument == "enable":
             self.debug_tool_chats.add(chat_id)
             self.send_message(chat_id, "Tool debug output enabled.")
@@ -329,7 +329,7 @@ class TelegramGateway:
         self.send_message(chat_id, "Usage: /debug-tool enable or /debug-tool disable.")
 
     def handle_reasoning_command(self, chat_id: str, text: str) -> None:
-        action, value = parse_reasoning_command_args(telegram_command_argument(text))
+        action, value = parse_reasoning_command_args(command_argument(text))
         if action == "status":
             effort_map = getattr(self.tomo, "channel_reasoning_effort", {})
             trace_map = getattr(self.tomo, "channel_trace_override", {})
@@ -530,16 +530,8 @@ def telegram_command(text: str) -> str | None:
     return command.lower()
 
 
-def telegram_command_argument(text: str) -> str | None:
-    parts = text.strip().split(maxsplit=1)
-    if len(parts) < 2:
-        return None
-    return parts[1].strip().lower() or None
-
-
 def run_telegram() -> None:
-    if load_tokens() is None:
-        print("Not logged in. Run `uv run tomo login` first.")
+    if not ensure_logged_in():
         return
     config = resolved_telegram_config()
     if config is None:
@@ -552,8 +544,7 @@ def run_telegram() -> None:
 
 
 def start_telegram() -> None:
-    if load_tokens() is None:
-        print("Not logged in. Run `uv run tomo login` first.")
+    if not ensure_logged_in():
         return
     if resolved_telegram_config() is None:
         print("Run `uv run tomo telegram-config set --bot-token TOKEN --chat-ids CHAT_ID` before starting the gateway.")
