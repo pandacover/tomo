@@ -592,7 +592,7 @@ def rank_texts(query: str, texts: list[str], k: int = 8) -> list[str]:
 MEMORY_FILE = Path("MEMORY.md")
 
 
-def _now_iso() -> str:
+def now_iso() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
@@ -601,7 +601,7 @@ def append_memory(text: str) -> str:
     """Append a timestamped durable memory to MEMORY.md. Use for user preferences, project facts, decisions, recurring context, and useful workarounds."""
     if not text or not text.strip():
         return "Error: memory text cannot be empty"
-    line = f"[{_now_iso()}] {text.strip()}\n"
+    line = f"[{now_iso()}] {text.strip()}\n"
     MEMORY_FILE.parent.mkdir(parents=True, exist_ok=True)
     with open(MEMORY_FILE, "a", encoding="utf-8") as f:
         f.write(line)

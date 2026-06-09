@@ -45,3 +45,11 @@ def delete_tokens() -> None:
     path = auth_path()
     if path.exists():
         path.unlink()
+
+
+def ensure_logged_in() -> bool:
+    """Print a friendly message and return False if no tokens; otherwise True."""
+    if load_tokens() is None:
+        print("Not logged in. Run `uv run tomo login` first.")
+        return False
+    return True

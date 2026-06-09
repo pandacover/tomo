@@ -11,7 +11,7 @@ from .telegram_config import (
     parse_allowed_chat_ids,
     save_telegram_config,
 )
-from .token_store import delete_tokens, load_tokens
+from .token_store import delete_tokens, ensure_logged_in, load_tokens
 from .telegram import restart_telegram, start_telegram, stop_telegram
 from .tui import run_chat
 from .desktop import run_desktop
@@ -78,8 +78,7 @@ def auth_status() -> None:
 
 
 def desktop() -> None:
-    if load_tokens() is None:
-        print("Not logged in. Run `uv run tomo login` first.")
+    if not ensure_logged_in():
         return
     run_desktop()
 

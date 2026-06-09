@@ -442,7 +442,7 @@ def test_cli_desktop_refuses_when_not_logged_in(monkeypatch, capsys):
     from tomo import cli
 
     monkeypatch.setattr(sys, "argv", ["tomo", "desktop"])
-    monkeypatch.setattr(cli, "load_tokens", lambda: None)
+    monkeypatch.setattr("tomo.token_store.load_tokens", lambda: None)
     calls = []
     monkeypatch.setattr(cli, "run_desktop", lambda: calls.append("desktop"))
 
@@ -457,7 +457,7 @@ def test_cli_desktop_calls_run_desktop_when_logged_in(monkeypatch):
 
     calls = []
     monkeypatch.setattr(sys, "argv", ["tomo", "desktop"])
-    monkeypatch.setattr(cli, "load_tokens", lambda: object())
+    monkeypatch.setattr("tomo.token_store.load_tokens", lambda: object())
     monkeypatch.setattr(cli, "run_desktop", lambda: calls.append("desktop"))
 
     cli.main()

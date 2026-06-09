@@ -76,6 +76,14 @@ def slash_prefix(text: str) -> str | None:
     return token if token != "/" else None
 
 
+def command_argument(text: str) -> str | None:
+    """Return the lowercased argument portion after the first token, or None if none."""
+    parts = text.strip().split(maxsplit=1)
+    if len(parts) < 2:
+        return None
+    return parts[1].strip().lower() or None
+
+
 def suggest_command(text: str, surface: Surface) -> str | None:
     prefix = slash_prefix(text)
     if prefix is None:
