@@ -155,6 +155,7 @@ def test_desktop_api_exposes_only_narrow_bridge_methods():
         "show_window",
         "start_voice_input",
         "stop_voice_input",
+        "toggle_voice_input",
     ]
     assert api.bootstrap()["ok"] is True
     assert api.poll_events() == []
@@ -189,6 +190,18 @@ def test_desktop_bridge_start_and_cancel_voice_input():
     assert bridge.cancel_voice_input() == {"ok": True}
     assert speech.canceled is True
     assert {"type": "voice_state", "state": "idle"} in bridge.poll_events()
+
+
+def test_desktop_bridge_toggle_voice_input_starts_and_cancels():
+    speech = FakeSpeechInput()
+    bridge = DesktopBridge(tomo=FakeTomo(), speech_input=speech)
+
+    assert bridge.toggle_voice_input() == {"ok": True}
+    assert speech.started is True
+
+    bridge._handle_voice_state("listening")
+    assert bridge.toggle_voice_input() == {"ok": True}
+    assert speech.canceled is True
 
 
 def test_desktop_bridge_rejects_duplicate_voice_input():
@@ -367,6 +380,7 @@ def test_desktop_app_quit_destroys_window_and_stops_tray():
     bridge.speech_input = speech
     app = DesktopApp(bridge=bridge, wsl_mode=False)
     app.tray_icon = tray
+    app.hotkey = SimpleNamespace(stop=lambda: None)
 
     app._quit()
 
@@ -390,6 +404,37 @@ def test_desktop_app_tray_click_shows_bottom_right_flyout(monkeypatch):
     assert window.shown is True
     assert window.restored is True
     assert window.focused is True
+
+
+def test_desktop_app_hotkey_shows_flyout_and_toggles_voice(monkeypatch):
+    speech = FakeSpeechInput()
+    bridge = DesktopBridge(tomo=FakeTomo(), speech_input=speech)
+    window = FakeWindow()
+    bridge.set_window(window)
+    app = DesktopApp(bridge=bridge, wsl_mode=False)
+    monkeypatch.setattr("tomo.desktop.get_windows_work_area", lambda: Rect(0, 0, 1440, 900))
+
+    assert app._toggle_voice_from_hotkey() == {"ok": True}
+
+    assert window.size == (420, 132)
+    assert window.position == (1008, 756)
+    assert window.shown is True
+    assert window.restored is True
+    assert window.focused is True
+    assert speech.started is True
+
+
+def test_desktop_html_renders_tools_in_transcript_without_status_label():
+    assert 'id="tools"' not in desktop.DESKTOP_HTML
+    assert 'id="state"' not in desktop.DESKTOP_HTML
+    assert "Working" not in desktop.DESKTOP_HTML
+    assert "tools-bubble" in desktop.DESKTOP_HTML
+    assert "currentToolGroup" in desktop.DESKTOP_HTML
+    assert "scrollbar-width: none" in desktop.DESKTOP_HTML
+    assert 'id="voice-panel"' not in desktop.DESKTOP_HTML
+    assert "Listening..." not in desktop.DESKTOP_HTML
+    assert "Cancel listening" in desktop.DESKTOP_HTML
+    assert "Stop sending" in desktop.DESKTOP_HTML
 
 
 def test_cli_desktop_refuses_when_not_logged_in(monkeypatch, capsys):
@@ -451,12 +496,14 @@ def test_desktop_app_wsl_uses_qt_and_visible_window(monkeypatch, capsys):
         created["kwargs"] = kwargs
         return fake_window
 
-    fake_webview = SimpleNamespace(
-        create_window=create_window,
-        start=lambda **kwargs: started.update(kwargs),
-    )
+    def start(callback, window, **kwargs):
+        started.update({"callback": callback, "window": window, "kwargs": kwargs})
+        callback(window)
+
+    fake_webview = SimpleNamespace(create_window=create_window, start=start)
     monkeypatch.setitem(sys.modules, "webview", fake_webview)
     monkeypatch.setattr("tomo.desktop.DesktopApp._start_tray", lambda self: tray_calls.append("tray"))
+    monkeypatch.setattr("tomo.desktop.DesktopApp._start_hotkey", lambda self: None)
     monkeypatch.setattr("tomo.desktop.validate_wsl_qt_backend", lambda: None)
     monkeypatch.delenv("QT_API", raising=False)
 
@@ -466,7 +513,8 @@ def test_desktop_app_wsl_uses_qt_and_visible_window(monkeypatch, capsys):
     assert created["kwargs"]["hidden"] is False
     assert created["kwargs"]["resizable"] is True
     assert created["kwargs"]["frameless"] is False
-    assert started == {"gui": "qt"}
+    assert started["window"] is fake_window
+    assert started["kwargs"] == {"gui": "qt"}
     assert tray_calls == []
     assert "WSL window mode" in capsys.readouterr().out
 
@@ -492,12 +540,14 @@ def test_desktop_app_native_windows_starts_hidden_with_default_webview(monkeypat
         created["kwargs"] = kwargs
         return fake_window
 
-    fake_webview = SimpleNamespace(
-        create_window=create_window,
-        start=lambda **kwargs: started.update({"called": True, "kwargs": kwargs}),
-    )
+    def start(callback, window, **kwargs):
+        started.update({"called": True, "callback": callback, "window": window, "kwargs": kwargs})
+        callback(window)
+
+    fake_webview = SimpleNamespace(create_window=create_window, start=start)
     monkeypatch.setitem(sys.modules, "webview", fake_webview)
     monkeypatch.setattr("tomo.desktop.DesktopApp._start_tray", lambda self: True)
+    monkeypatch.setattr("tomo.desktop.DesktopApp._start_hotkey", lambda self: True)
     monkeypatch.setattr("tomo.desktop.validate_qt_backend", lambda: None)
     monkeypatch.delenv("QT_API", raising=False)
 
@@ -517,7 +567,9 @@ def test_desktop_app_native_windows_starts_hidden_with_default_webview(monkeypat
     assert created["kwargs"]["maximized"] is False
     assert isinstance(created["kwargs"]["js_api"], DesktopApi)
     assert not isinstance(created["kwargs"]["js_api"], DesktopBridge)
-    assert started == {"called": True, "kwargs": {"gui": "qt"}}
+    assert fake_window is started["window"]
+    assert started["called"] is True
+    assert started["kwargs"] == {"gui": "qt"}
 
 
 def test_desktop_app_wsl_close_exits_instead_of_hiding():

@@ -21,6 +21,12 @@ FLYOUT_MAX_HEIGHT = 700
 FLYOUT_MIN_HEIGHT = 96
 FLYOUT_MARGIN = 12
 VOICE_AUTO_SEND_DELAY_SECONDS = 3.0
+VOICE_HOTKEY_ID = 0x544F
+WM_HOTKEY = 0x0312
+WM_QUIT = 0x0012
+MOD_CONTROL = 0x0002
+MOD_NOREPEAT = 0x4000
+VK_SPACE = 0x20
 DesktopEvent = dict[str, Any]
 
 
@@ -188,6 +194,11 @@ class DesktopBridge:
             return {"ok": False, "error": "Voice input is already listening."}
         return {"ok": True}
 
+    def toggle_voice_input(self) -> dict[str, object]:
+        if self.voice_state == "listening":
+            return self.cancel_voice_input()
+        return self.start_voice_input()
+
     def stop_voice_input(self) -> dict[str, object]:
         stop = getattr(self.speech_input, "stop", None)
         if callable(stop):
@@ -324,6 +335,9 @@ class DesktopApi:
     def start_voice_input(self) -> dict[str, object]:
         return self._bridge.start_voice_input()
 
+    def toggle_voice_input(self) -> dict[str, object]:
+        return self._bridge.toggle_voice_input()
+
     def stop_voice_input(self) -> dict[str, object]:
         return self._bridge.stop_voice_input()
 
@@ -350,6 +364,7 @@ class DesktopApp:
         self.bridge = bridge or DesktopBridge()
         self.bridge.quit_callback = self._quit
         self.tray_icon: object | None = None
+        self.hotkey: GlobalVoiceHotkey | None = None
         self.wsl_mode = is_wsl() if wsl_mode is None else wsl_mode
 
     def run(self) -> None:
@@ -357,34 +372,57 @@ class DesktopApp:
         validate_qt_backend()
         import webview
 
-        window = webview.create_window(
-            "Tomo",
-            html=DESKTOP_HTML,
-            js_api=DesktopApi(self.bridge),
-            width=720 if self.wsl_mode else FLYOUT_WIDTH,
-            height=860 if self.wsl_mode else FLYOUT_INITIAL_HEIGHT,
-            min_size=(420, 120) if self.wsl_mode else (320, FLYOUT_MIN_HEIGHT),
-            hidden=not self.wsl_mode,
-            resizable=self.wsl_mode,
-            frameless=not self.wsl_mode,
-            transparent=not self.wsl_mode,
-            easy_drag=False,
-            draggable=False,
-            maximized=False,
-            background_color="#000000" if not self.wsl_mode else "#FFFFFF",
-            text_select=True,
-        )
+        window = webview.create_window("Tomo", **self._window_options())
         self.bridge.set_window(window)
         window.events.closing += self.on_window_closing
-        if not self.wsl_mode:
-            self._start_tray()
+        webview.start(self._on_webview_started, window, gui="qt")
+
+    def _window_options(self) -> dict[str, object]:
+        if self.wsl_mode:
+            return {
+                "html": DESKTOP_HTML,
+                "js_api": DesktopApi(self.bridge),
+                "width": 720,
+                "height": 860,
+                "min_size": (420, 120),
+                "hidden": False,
+                "resizable": True,
+                "frameless": False,
+                "transparent": False,
+                "easy_drag": False,
+                "draggable": False,
+                "maximized": False,
+                "background_color": "#FFFFFF",
+                "text_select": True,
+            }
+        return {
+            "html": DESKTOP_HTML,
+            "js_api": DesktopApi(self.bridge),
+            "width": FLYOUT_WIDTH,
+            "height": FLYOUT_INITIAL_HEIGHT,
+            "min_size": (320, FLYOUT_MIN_HEIGHT),
+            "hidden": True,
+            "resizable": False,
+            "frameless": True,
+            "transparent": True,
+            "easy_drag": False,
+            "draggable": False,
+            "maximized": False,
+            "background_color": "#000000",
+            "text_select": True,
+        }
+
+    def _on_webview_started(self, window: object) -> None:
+        self.bridge.set_window(window)
         if self.wsl_mode:
             print(
                 "Tomo desktop is running in WSL window mode; close the window to quit."
             )
             self.bridge.quitting = True
-        start_kwargs = {"gui": "qt"}
-        webview.start(**start_kwargs)
+            return
+        self._position_flyout()
+        self._start_tray()
+        self._start_hotkey()
 
     def on_window_closing(self, *_: object) -> bool:
         if self.wsl_mode:
@@ -429,6 +467,11 @@ class DesktopApp:
         self._position_flyout()
         self.bridge.show_window()
 
+    def _toggle_voice_from_hotkey(self) -> dict[str, object]:
+        self._position_flyout()
+        self.bridge.show_window()
+        return self.bridge.toggle_voice_input()
+
     def _position_flyout(self) -> None:
         if self.bridge.window is None:
             return
@@ -439,11 +482,83 @@ class DesktopApp:
 
     def _quit(self) -> None:
         self.bridge.quitting = True
+        if self.hotkey is not None:
+            self.hotkey.stop()
         self.bridge._shutdown_speech_input()
         if self.bridge.window is not None:
             call_window(self.bridge.window, "destroy")
         if self.tray_icon is not None:
             call_window(self.tray_icon, "stop")
+
+    def _start_hotkey(self) -> bool:
+        self.hotkey = GlobalVoiceHotkey(self._toggle_voice_from_hotkey)
+        try:
+            started = self.hotkey.start()
+        except Exception as exc:  # noqa: BLE001
+            print(f"Tomo desktop hotkey Ctrl+Space is unavailable: {exc}")
+            return False
+        if not started:
+            print(
+                "Tomo desktop hotkey Ctrl+Space is unavailable: "
+                f"{self.hotkey.error or 'registration failed'}"
+            )
+        return started
+
+
+class GlobalVoiceHotkey:
+    def __init__(self, callback: Callable[[], object]) -> None:
+        self.callback = callback
+        self.thread: threading.Thread | None = None
+        self.thread_id = 0
+        self.error = ""
+        self._started = threading.Event()
+        self._registered = False
+
+    def start(self) -> bool:
+        if os.name != "nt":
+            self.error = "global hotkeys are only available on native Windows"
+            return False
+        if self.thread is not None:
+            return self._registered
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.start()
+        self._started.wait(timeout=1)
+        return self._registered
+
+    def stop(self) -> None:
+        if os.name != "nt" or self.thread_id == 0:
+            return
+        import ctypes
+
+        ctypes.windll.user32.PostThreadMessageW(self.thread_id, WM_QUIT, 0, 0)
+
+    def _run(self) -> None:
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+        kernel32.GetCurrentThreadId.restype = wintypes.DWORD
+        kernel32.GetLastError.restype = wintypes.DWORD
+        self.thread_id = kernel32.GetCurrentThreadId()
+
+        modifiers = MOD_CONTROL | MOD_NOREPEAT
+        self._registered = bool(
+            user32.RegisterHotKey(None, VOICE_HOTKEY_ID, modifiers, VK_SPACE)
+        )
+        if not self._registered:
+            self.error = ctypes.FormatError(kernel32.GetLastError())
+            self._started.set()
+            return
+        self._started.set()
+
+        msg = wintypes.MSG()
+        try:
+            while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) != 0:
+                if msg.message == WM_HOTKEY and msg.wParam == VOICE_HOTKEY_ID:
+                    self.callback()
+        finally:
+            user32.UnregisterHotKey(None, VOICE_HOTKEY_ID)
 
 
 def message_to_dto(message: dict[str, Any]) -> dict[str, Any]:
@@ -604,6 +719,8 @@ DESKTOP_HTML = f"""
   --tool: #26323a;
 }}
 * {{ box-sizing: border-box; }}
+* {{ scrollbar-width: none; }}
+*::-webkit-scrollbar {{ display: none; }}
 html, body {{ min-height: 0; margin: 0; background: transparent; }}
 body {{
   background: transparent;
@@ -612,22 +729,14 @@ body {{
   font-size: 14px;
   overflow: hidden;
 }}
-button, textarea {{ font: inherit; }}
+button {{ font: inherit; }}
 .shell {{ display: block; }}
-.meta-row {{
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 10px;
-  align-items: center;
-  padding: 8px 4px 0;
-}}
+.meta-row {{ padding: 8px 4px 0; }}
 .meta {{ color: var(--muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
-.state {{ color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }}
-.state.busy {{ color: var(--accent); }}
 main {{ min-height: 0; display: grid; grid-template-rows: auto auto; }}
 #transcript {{ overflow-y: auto; padding: 18px 16px 14px; }}
-.msg {{ max-width: 88%; margin: 0 0 14px; }}
-.msg.user {{ margin-left: auto; }}
+.msg {{ width: fit-content; max-width: 88%; margin: 0 0 14px; }}
+.msg.user {{ margin-left: 0; }}
 .bubble {{
   padding: 11px 12px;
   border: 1px solid var(--line);
@@ -641,87 +750,70 @@ main {{ min-height: 0; display: grid; grid-template-rows: auto auto; }}
 }}
 .user .bubble {{ background: var(--user); color: var(--ink); border-color: rgba(18, 63, 53, .2); }}
 .speaker {{ font-size: 11px; color: var(--muted); margin: 0 0 4px 2px; }}
-.user .speaker {{ text-align: right; margin-right: 2px; }}
+.user .speaker {{ text-align: left; margin-right: 2px; }}
 .images {{ display: grid; gap: 8px; margin-top: 8px; }}
 .images img {{ max-width: 100%; border-radius: 6px; border: 1px solid var(--line); }}
-#tools {{
-  max-height: 120px;
-  overflow-y: auto;
-  border-top: 1px solid var(--line);
-  background: #e4e8df;
-  padding: 8px 12px;
+.tools-message {{ width: fit-content; max-width: 88%; }}
+.tools-bubble {{
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, .24);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+  color: var(--ink);
+  overflow: hidden;
+}}
+.tools-bubble summary {{
+  cursor: pointer;
+  padding: 9px 11px;
+  color: rgba(255, 255, 255, .9);
+  font-size: 12px;
+  list-style: none;
+}}
+.tools-bubble summary::-webkit-details-marker {{ display: none; }}
+.tools-bubble summary::before {{ content: ">"; display: inline-block; margin-right: 7px; color: #82e1b1; }}
+.tools-bubble[open] summary::before {{ transform: rotate(90deg); }}
+.tool-list {{
+  display: grid;
+  gap: 6px;
+  padding: 0 11px 10px;
   font-family: "Cascadia Mono", "Consolas", monospace;
   font-size: 12px;
-  display: none;
 }}
-#tools.visible {{ display: block; }}
-.tool-row {{ color: var(--tool); margin: 0 0 4px; overflow-wrap: anywhere; }}
+.tool-row {{ color: rgba(255, 255, 255, .82); overflow-wrap: anywhere; }}
 #approval {{ display: none; border-top: 1px solid var(--line); background: #fff7df; padding: 12px 14px; }}
 #approval.visible {{ display: block; }}
 #approval-title {{ font-weight: 700; margin-bottom: 5px; }}
 #approval-body {{ color: #4b4430; white-space: pre-wrap; overflow-wrap: anywhere; }}
 .approval-actions {{ display: flex; gap: 8px; margin-top: 10px; }}
-#voice-panel {{
-  display: none;
-  border-top: 1px solid var(--line);
-  background: #edf5f0;
-  padding: 10px 12px;
-  gap: 8px;
-  grid-template-columns: 1fr auto;
-  align-items: center;
-}}
-#voice-panel.visible {{ display: grid; }}
-#voice-text {{ color: var(--ink); overflow-wrap: anywhere; }}
-#voice-text.muted {{ color: var(--muted); }}
-.composer {{
-  padding: 12px;
-}}
-.input-wrap {{ position: relative; }}
-#input {{
-  display: block;
-  width: 100%;
-  resize: none;
-  min-height: 44px;
-  max-height: 104px;
-  padding: 11px 92px 11px 12px;
-  border: 1px solid var(--line);
-  border-radius: 7px;
-  background: var(--glass);
-  backdrop-filter: blur(18px);
-  -webkit-backdrop-filter: blur(18px);
-  color: var(--ink);
-  outline: none;
-  line-height: 20px;
-  overflow-y: hidden;
-}}
-textarea:focus {{ border-color: var(--accent); }}
+.composer {{ padding: 12px; }}
 button {{
   background: transparent;
   color: white;
+  border: 1px solid var(--line);
   border-radius: 7px;
   padding: 0 14px;
-  min-width: 76px;
   cursor: pointer;
 }}
 button.secondary {{ background: transparent; color: var(--ink); }}
 button.danger {{ background: var(--danger); border-color: var(--danger); }}
-button.icon {{
-  min-width: 34px;
-  width: 34px;
-  height: 34px;
-  padding: 0;
-  display: inline-grid;
-  place-items: center;
-}}
-.input-actions {{
-  position: absolute;
-  right: 6px;
-  bottom: 6px;
+.voice-button {{
+  width: fit-content;
+  min-height: 44px;
+  padding: 0 16px;
   display: flex;
-  gap: 6px;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  background: transparent;
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+  color: var(--ink);
+  font-weight: 650;
 }}
-.input-actions svg {{ width: 17px; height: 17px; stroke-width: 2; }}
-button.icon.listening {{ background: var(--accent); border-color: var(--accent); }}
+.voice-button svg {{ width: 17px; height: 17px; stroke-width: 2; }}
+.voice-button.listening,
+.voice-button.sending {{ background: transparent; border-color: var(--accent); color: var(--accent); }}
 button:disabled {{ opacity: .45; cursor: default; }}
 .empty {{ display: none; }}
 </style>
@@ -731,7 +823,6 @@ button:disabled {{ opacity: .45; cursor: default; }}
   <main>
     <div id="transcript"><div class="empty">No messages yet.</div></div>
     <div id="bottom-panel">
-      <div id="tools"></div>
       <div id="approval">
         <div id="approval-title">Approval required</div>
         <div id="approval-body"></div>
@@ -740,68 +831,44 @@ button:disabled {{ opacity: .45; cursor: default; }}
           <button id="deny" class="danger">Deny</button>
         </div>
       </div>
-      <div id="voice-panel">
-        <div id="voice-text" class="muted"></div>
-        <button id="voice-cancel" type="button" class="secondary">Cancel</button>
-      </div>
-      <form class="composer" id="composer">
-        <div class="input-wrap">
-          <textarea id="input" rows="1" placeholder="Message Tomo"></textarea>
-          <div class="input-actions">
-            <button id="voice" class="icon secondary" type="button" title="Voice input" aria-label="Voice input">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true">
-                <path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3Z"></path>
-                <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
-                <path d="M12 19v3"></path>
-              </svg>
-            </button>
-            <button id="send" class="icon" type="submit" title="Send" aria-label="Send">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true">
-                <path d="m22 2-7 20-4-9-9-4Z"></path>
-                <path d="M22 2 11 13"></path>
-              </svg>
-            </button>
-          </div>
-        </div>
+      <div class="composer" id="composer">
+        <button id="voice" class="voice-button secondary" type="button" title="Speak" aria-label="Speak">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true">
+            <path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3Z"></path>
+            <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
+            <path d="M12 19v3"></path>
+          </svg>
+          <span id="voice-label">Speak</span>
+        </button>
         <div class="meta-row">
           <div class="meta" id="meta">{html.escape(settings.model)}</div>
-          <div class="state" id="state">Ready</div>
         </div>
-      </form>
+      </div>
     </div>
   </main>
 </div>
 <script>
 const transcript = document.getElementById('transcript');
 const bottomPanel = document.getElementById('bottom-panel');
-const tools = document.getElementById('tools');
-const state = document.getElementById('state');
 const meta = document.getElementById('meta');
-const input = document.getElementById('input');
-const send = document.getElementById('send');
 const composer = document.getElementById('composer');
 const approval = document.getElementById('approval');
 const approvalBody = document.getElementById('approval-body');
 const approve = document.getElementById('approve');
 const deny = document.getElementById('deny');
 const voice = document.getElementById('voice');
-const voicePanel = document.getElementById('voice-panel');
-const voiceText = document.getElementById('voice-text');
-const voiceCancel = document.getElementById('voice-cancel');
+const voiceLabel = document.getElementById('voice-label');
 let busy = false;
 let pendingApproval = null;
 let voiceState = 'idle';
 let streamingBubble = null;
+let currentToolGroup = null;
 let resizeTimer = null;
 
 function api() {{ return window.pywebview.api; }}
 function setBusy(value) {{
   busy = value;
-  state.textContent = value ? 'Working' : pendingApproval ? 'Approval' : voiceState === 'listening' ? 'Listening' : voiceState === 'sending' ? 'Sending' : 'Ready';
-  state.classList.toggle('busy', value || !!pendingApproval || voiceState !== 'idle');
-  send.disabled = value || !!pendingApproval;
-  input.disabled = !!pendingApproval;
-  voice.disabled = value || !!pendingApproval || voiceState === 'sending';
+  voice.disabled = value || !!pendingApproval;
 }}
 function clearEmpty() {{
   const empty = transcript.querySelector('.empty');
@@ -829,6 +896,7 @@ function scheduleResize() {{
 function addMessage(role, text, images = []) {{
   clearEmpty();
   streamingBubble = null;
+  if (role === 'user') currentToolGroup = null;
   const row = document.createElement('section');
   row.className = `msg ${{role}}`;
   const speaker = document.createElement('div');
@@ -861,12 +929,27 @@ function addDelta(text) {{
   scheduleResize();
 }}
 function addTool(event) {{
-  tools.classList.add('visible');
+  clearEmpty();
+  if (!currentToolGroup) {{
+    const row = document.createElement('section');
+    row.className = 'msg tools-message';
+    const details = document.createElement('details');
+    details.className = 'tools-bubble';
+    const summary = document.createElement('summary');
+    const list = document.createElement('div');
+    list.className = 'tool-list';
+    details.append(summary, list);
+    row.appendChild(details);
+    transcript.appendChild(row);
+    currentToolGroup = {{ count: 0, summary, list }};
+  }}
+  currentToolGroup.count += 1;
+  currentToolGroup.summary.textContent = `tools ${{currentToolGroup.count}} tool call${{currentToolGroup.count === 1 ? '' : 's'}}`;
   const row = document.createElement('div');
   row.className = 'tool-row';
   row.textContent = `${{event.name}}: "${{event.input || ''}}"`;
-  tools.appendChild(row);
-  tools.scrollTop = tools.scrollHeight;
+  currentToolGroup.list.appendChild(row);
+  scrollBottom();
   scheduleResize();
 }}
 function showApproval(event) {{
@@ -885,20 +968,11 @@ function hideApproval() {{
 function setVoiceState(nextState) {{
   voiceState = nextState || 'idle';
   voice.classList.toggle('listening', voiceState === 'listening');
-  voice.title = voiceState === 'listening' ? 'Stop voice input' : 'Voice input';
+  voice.classList.toggle('sending', voiceState === 'sending');
+  voiceLabel.textContent = voiceState === 'listening' ? 'Cancel' : voiceState === 'sending' ? 'Stop' : 'Speak';
+  voice.title = voiceState === 'listening' ? 'Cancel listening' : voiceState === 'sending' ? 'Stop sending' : 'Speak';
   voice.setAttribute('aria-label', voice.title);
-  if (voiceState === 'idle') {{
-    voicePanel.classList.remove('visible');
-    voiceText.textContent = '';
-    voiceText.classList.add('muted');
-  }}
   setBusy(busy);
-  scheduleResize();
-}}
-function setVoiceText(text, muted = false) {{
-  voicePanel.classList.add('visible');
-  voiceText.textContent = text;
-  voiceText.classList.toggle('muted', muted);
   scheduleResize();
 }}
 async function handleEvent(event) {{
@@ -929,14 +1003,8 @@ async function handleEvent(event) {{
   if (event.type === 'error') addMessage('assistant', `Error: ${{event.message}}`);
   if (event.type === 'voice_state') {{
     setVoiceState(event.state);
-    if (event.state === 'listening') setVoiceText('Listening...', true);
   }}
-  if (event.type === 'voice_partial') setVoiceText(event.text);
-  if (event.type === 'voice_final') {{
-    input.value = event.text;
-    resizeInput();
-    setVoiceText(`Sending in ${{event.send_delay}}s: ${{event.text}}`);
-  }}
+  if (event.type === 'voice_final') setVoiceState('sending');
   if (event.type === 'voice_error') {{
     setVoiceState('idle');
     addMessage('assistant', `Voice input error: ${{event.message}}`);
@@ -950,46 +1018,16 @@ async function poll() {{
     setTimeout(poll, 180);
   }}
 }}
-composer.addEventListener('submit', async (event) => {{
-  event.preventDefault();
-  const text = input.value.trim();
-  if (!text) return;
-  const result = await api().send_message(text);
-  if (result.ok) {{
-    input.value = '';
-    resizeInput();
-  }}
-  else addMessage('assistant', result.error || 'Unable to send message.');
-}});
-function resizeInput() {{
-  input.style.height = 'auto';
-  const lineHeight = Number.parseFloat(getComputedStyle(input).lineHeight) || 20;
-  const maxHeight = (lineHeight * 4) + 22;
-  input.style.height = `${{Math.min(input.scrollHeight, maxHeight)}}px`;
-  input.style.overflowY = input.scrollHeight > maxHeight ? 'auto' : 'hidden';
-  scheduleResize();
-}}
-input.addEventListener('input', resizeInput);
 new ResizeObserver(scheduleResize).observe(bottomPanel);
 new ResizeObserver(scheduleResize).observe(transcript);
-input.addEventListener('keydown', (event) => {{
-  if (event.key === 'Enter' && !event.shiftKey) {{
-    event.preventDefault();
-    composer.requestSubmit();
-  }}
-}});
 voice.addEventListener('click', async () => {{
-  if (voiceState === 'listening') {{
+  if (voiceState === 'listening' || voiceState === 'sending') {{
     await api().cancel_voice_input();
     setVoiceState('idle');
     return;
   }}
-  const result = await api().start_voice_input();
+  const result = await api().toggle_voice_input();
   if (!result.ok) addMessage('assistant', result.error || 'Unable to start voice input.');
-}});
-voiceCancel.addEventListener('click', async () => {{
-  await api().cancel_voice_input();
-  setVoiceState('idle');
 }});
 approve.addEventListener('click', () => pendingApproval && api().resolve_approval(pendingApproval, true));
 deny.addEventListener('click', () => pendingApproval && api().resolve_approval(pendingApproval, false));
@@ -1000,7 +1038,6 @@ window.addEventListener('pywebviewready', async () => {{
     for (const message of data.messages) addMessage(message.role === 'user' ? 'user' : 'assistant', message.text, message.images || []);
     setVoiceState(data.voice_state || 'idle');
     setBusy(data.busy);
-    resizeInput();
     scheduleResize();
   }}
   poll();
