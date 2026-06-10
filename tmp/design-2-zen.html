@@ -1,0 +1,370 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tomo • Zen</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&amp;family=Instrument+Sans:wght@400;500;600&amp;display=swap');
+    
+    body {
+      font-family: "Instrument Sans", "Inter", system-ui, -apple-system, sans-serif;
+    }
+    
+    .flyout {
+      width: 420px;
+      max-width: 100%;
+      box-shadow: 0 30px 70px -18px rgb(0 0 0 / 0.16), 0 12px 24px -10px rgb(0 0 0 / 0.1);
+      border-radius: 22px;
+      overflow: hidden;
+      background: #f8f9f6;
+      border: 1px solid #e5e7e2;
+    }
+    
+    .zen-header {
+      background: #f8f9f6;
+      border-bottom: 1px solid #e8eae4;
+    }
+    
+    .message {
+      border-radius: 16px;
+      padding: 13px 15px;
+      font-size: 14px;
+      line-height: 1.5;
+      transition: box-shadow .1s ease;
+    }
+    
+    .message.assistant {
+      background: #ffffff;
+      border: 1px solid #e6e8e2;
+      color: #22251f;
+      box-shadow: 0 1px 2px -1px rgb(0 0 0 / 0.04);
+    }
+    
+    .message.user {
+      background: #f0f2eb;
+      border: 1px solid #d9dcd3;
+      color: #22251f;
+    }
+    
+    .chat-container {
+      background: #f8f9f6;
+      scrollbar-width: none;
+    }
+    .chat-container::-webkit-scrollbar { display: none; }
+    
+    .composer {
+      background: #ffffff;
+      border: 1px solid #e6e8e2;
+      box-shadow: 0 2px 5px -2px rgb(0 0 0 / 0.05);
+    }
+    
+    .voice-circle {
+      width: 48px;
+      height: 48px;
+      background: #1f2420;
+      color: #fff;
+      border-radius: 9999px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: transform 0.2s cubic-bezier(0.23, 1, 0.32, 1), 
+                  background-color 0.2s ease;
+      box-shadow: 0 4px 14px -3px rgb(31 36 32 / 0.35);
+    }
+    
+    .voice-circle.listening {
+      background: #b91c1c;
+      animation: breathe 1.6s ease-in-out infinite;
+    }
+    
+    .voice-circle.sending {
+      background: #3f7a5e;
+    }
+    
+    @keyframes breathe {
+      0%, 100% { transform: scale(1); }
+      50% { transform: scale(1.06); }
+    }
+    
+    .section-title {
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.6px;
+      color: #6b7365;
+    }
+    
+    .context-pill {
+      background: #ffffff;
+      border: 1px solid #e1e4db;
+      border-radius: 999px;
+      font-size: 12px;
+      padding: 5px 13px 5px 9px;
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      box-shadow: 0 1px 2px rgb(0 0 0 / 0.03);
+    }
+    
+    .zen-message {
+      max-width: 86%;
+    }
+    
+    .minimal-divider {
+      height: 1px;
+      background: linear-gradient(to right, transparent, #e5e7e2, transparent);
+    }
+    
+    .status-dot {
+      width: 5px;
+      height: 5px;
+      background: #3f7a5e;
+      border-radius: 50%;
+    }
+  </style>
+</head>
+<body class="bg-[#e5e7e0] flex items-center justify-center min-h-screen p-8">
+  <div>
+    <!-- Subtle desktop frame hint -->
+    <div class="mx-auto" style="width: 420px;">
+      <div class="flyout">
+        
+        <!-- Refined header -->
+        <div class="zen-header px-5 pt-4 pb-3.5">
+          <div class="flex items-center justify-between">
+            <div class="flex items-center gap-3">
+              <div class="w-6 h-6 rounded-xl bg-[#22251f] flex items-center justify-center">
+                <span class="text-white text-[13px] font-semibold tracking-tighter">T</span>
+              </div>
+              <div>
+                <div class="font-semibold text-[17px] tracking-[-0.25px] text-[#22251f]">Tomo</div>
+              </div>
+            </div>
+            
+            <div class="flex items-center gap-2">
+              <!-- Model -->
+              <div class="flex items-center text-xs gap-1.5 px-2.5 h-7 rounded-full border border-[#e1e4db] bg-white">
+                <div class="status-dot"></div>
+                <span class="font-medium text-[#3a3f35]">grok-4.3</span>
+              </div>
+              
+              <button onclick="showZenSettings()" 
+                      class="text-[#6b7365] hover:text-[#22251f] w-8 h-8 flex items-center justify-center rounded-2xl hover:bg-white/70 transition-colors">
+                <i class="fa-solid fa-ellipsis-h"></i>
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Subtle context / status row (inspired by the image but very restrained) -->
+        <div class="px-5 pt-2 pb-3">
+          <div class="context-pill w-fit text-[#3a3f35]">
+            <div class="flex items-center">
+              <i class="fa-solid fa-link text-[#3f7a5e] text-xs mr-1.5"></i>
+              <span class="text-xs font-medium">3 files • enhancement context active</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Messages -->
+        <div id="chat" class="chat-container h-[368px] overflow-y-auto px-5 py-1 space-y-[13px]">
+          
+          <div class="zen-message">
+            <div class="text-[10px] font-medium text-[#6b7365] mb-1 pl-0.5">You</div>
+            <div class="message user">
+              Can you help me think through the desktop UI overhaul? I want three distinct directions.
+            </div>
+          </div>
+          
+          <div class="zen-message">
+            <div class="text-[10px] font-medium text-[#6b7365] mb-1 pl-0.5">Tomo</div>
+            <div class="message assistant">
+              Absolutely. The current flyout is quite functional but the visual language could be much calmer.
+            </div>
+          </div>
+          
+          <div class="zen-message">
+            <div class="text-[10px] font-medium text-[#6b7365] mb-1 pl-0.5">Tomo</div>
+            <div class="message assistant">
+              I like the idea of borrowing the soft rounded cards and clear hierarchy from the Linear → Notion example you showed.
+            </div>
+          </div>
+          
+        </div>
+
+        <div class="minimal-divider mx-5"></div>
+
+        <!-- Composer -->
+        <div class="p-4 bg-[#f8f9f6]">
+          <div class="flex items-center gap-2.5">
+            <div class="flex-1 composer rounded-3xl px-5 py-[9px] flex items-center">
+              <input id="input" 
+                     class="flex-1 bg-transparent text-[14.5px] placeholder-[#8b9285] text-[#22251f] outline-none"
+                     placeholder="Write a message..."
+                     onkeydown="if (event.key === 'Enter') zenSend()">
+            </div>
+            
+            <button onclick="zenSend()" 
+                    class="w-9 h-9 rounded-2xl flex items-center justify-center text-[#3f7a5e] hover:bg-[#f0f2eb] active:bg-[#e6e8e1] transition-colors">
+              <i class="fa-solid fa-paper-plane text-[15px]"></i>
+            </button>
+            
+            <button id="voice-zen"
+                    onclick="zenToggleVoice()"
+                    class="voice-circle ml-0.5">
+              <i class="fa-solid fa-microphone"></i>
+            </button>
+          </div>
+          
+          <div class="text-center mt-2">
+            <span class="text-[#8b9285] text-[10px]">Press / to focus • Ctrl+Space for voice</span>
+          </div>
+        </div>
+        
+      </div>
+    </div>
+  </div>
+
+  <script>
+    function initTailwind() {
+      // No heavy tailwind config needed
+    }
+    
+    let voiceState = 'idle';
+    
+    function zenToggleVoice() {
+      const btn = document.getElementById('voice-zen');
+      
+      if (voiceState === 'idle') {
+        voiceState = 'listening';
+        btn.classList.add('listening');
+        btn.innerHTML = '<i class="fa-solid fa-stop"></i>';
+        
+        setTimeout(() => {
+          if (voiceState === 'listening') {
+            appendZenUser("What do you think about making the chat feel more like a calm writing surface?");
+            voiceState = 'idle';
+            btn.classList.remove('listening');
+            btn.innerHTML = '<i class="fa-solid fa-microphone"></i>';
+            
+            setTimeout(() => {
+              appendZenAssistant("That direction feels very promising. We could reduce visual noise significantly and treat every message like a considered paragraph.");
+            }, 780);
+          }
+        }, 1550);
+      } else {
+        voiceState = 'idle';
+        btn.classList.remove('listening');
+        btn.innerHTML = '<i class="fa-solid fa-microphone"></i>';
+      }
+    }
+    
+    function zenSend() {
+      const input = document.getElementById('input');
+      const val = input.value.trim();
+      if (!val) return;
+      
+      appendZenUser(val);
+      input.value = '';
+      
+      setTimeout(() => {
+        const options = [
+          "I agree — the current density works for power users but a calmer surface might help long sessions.",
+          "One idea: treat the transcript more like a living document than a typical chat log.",
+          "We could introduce subtle section dividers when the topic shifts.",
+          "The enhancement tag idea from your screenshot could translate into contextual skill pills."
+        ];
+        appendZenAssistant(options[Math.floor(Math.random() * options.length)]);
+      }, 580);
+    }
+    
+    function appendZenUser(text) {
+      const container = document.getElementById('chat');
+      const wrap = document.createElement('div');
+      wrap.className = 'zen-message';
+      wrap.innerHTML = `
+        <div class="text-[10px] font-medium text-[#6b7365] mb-1 pl-0.5">You</div>
+        <div class="message user">${escape(text)}</div>
+      `;
+      container.appendChild(wrap);
+      container.scrollTop = container.scrollHeight;
+    }
+    
+    function appendZenAssistant(text) {
+      const container = document.getElementById('chat');
+      const wrap = document.createElement('div');
+      wrap.className = 'zen-message';
+      wrap.innerHTML = `
+        <div class="text-[10px] font-medium text-[#6b7365] mb-1 pl-0.5">Tomo</div>
+        <div class="message assistant">${escape(text)}</div>
+      `;
+      container.appendChild(wrap);
+      container.scrollTop = container.scrollHeight;
+    }
+    
+    function escape(str) {
+      return str.replace(/[&<>"']/g, s => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[s]));
+    }
+    
+    function showZenSettings() {
+      const m = document.createElement('div');
+      m.className = 'fixed inset-0 bg-black/40 flex items-end sm:items-center justify-center z-[60]';
+      m.innerHTML = `
+        <div class="bg-white w-full sm:w-[340px] rounded-t-3xl sm:rounded-3xl p-6 text-sm shadow-xl border border-[#e5e7e2]">
+          <div class="flex justify-between items-center mb-4">
+            <div class="font-semibold text-base tracking-tight">Preferences</div>
+            <button class="text-[#6b7365]" onclick="this.closest('.fixed').remove()">Close</button>
+          </div>
+          
+          <div class="space-y-4 text-[#22251f]">
+            <div class="flex justify-between">
+              <div>Message density</div>
+              <div class="font-medium text-[#3f7a5e]">Comfortable</div>
+            </div>
+            <div class="flex justify-between">
+              <div>Sound</div>
+              <div class="font-medium">Off</div>
+            </div>
+            <div class="flex justify-between">
+              <div>Context awareness</div>
+              <div class="font-medium text-[#3f7a5e]">High</div>
+            </div>
+          </div>
+          
+          <div class="mt-6 pt-4 border-t text-center">
+            <button onclick="this.closest('.fixed').remove()" 
+                    class="text-xs px-6 py-2 rounded-2xl border border-[#d9dcd3] hover:bg-[#f8f9f6]">Done</button>
+          </div>
+        </div>
+      `;
+      document.body.appendChild(m);
+    }
+    
+    function init() {
+      initTailwind();
+      
+      const chat = document.getElementById('chat');
+      chat.scrollTop = chat.scrollHeight;
+      
+      // Keyboard slash focus
+      document.addEventListener('keydown', function(e) {
+        if (e.key === '/' && document.activeElement.tagName === 'BODY') {
+          e.preventDefault();
+          document.getElementById('input').focus();
+        }
+      });
+      
+      // Optional seed message after delay
+      setTimeout(() => {
+        // already has good starter content
+      }, 900);
+      
+      console.log('%c[Zen] Clean, restrained prototype initialized', 'color:#6b7365');
+    }
+    
+    window.onload = init;
+  </script>
+</body>
+</html>

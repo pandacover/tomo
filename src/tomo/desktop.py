@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-import html
+from pathlib import Path
+
 import os
 import queue
 import threading
@@ -116,6 +117,7 @@ class DesktopBridge:
         )
         self._voice_send_timer: threading.Timer | None = None
         self._pending_voice_text = ""
+        self._flyout_height = FLYOUT_INITIAL_HEIGHT
         self._lock = threading.Lock()
 
     def set_window(self, window: object) -> None:
@@ -224,13 +226,16 @@ class DesktopBridge:
         except (TypeError, ValueError):
             return {"ok": False, "error": "Invalid flyout height."}
         actual_height = position_flyout_window(self.window, requested_height)
+        self._flyout_height = actual_height
         return {"ok": True, "height": actual_height}
 
     def show_window(self) -> dict[str, object]:
         if self.window is not None:
+            position_flyout_window(self.window, self._flyout_height)
             call_window(self.window, "show")
             call_window(self.window, "restore")
             call_window(self.window, "focus")
+            evaluate_js(self.window, "scheduleResize()")
         return {"ok": True}
 
     def hide_window(self) -> dict[str, object]:
@@ -376,6 +381,7 @@ class DesktopApp:
         window = webview.create_window("Tomo", **self._window_options())
         self.bridge.set_window(window)
         window.events.closing += self.on_window_closing
+        window.events.shown += self._on_window_shown
         webview.start(self._on_webview_started, window, gui="qt")
 
     def _window_options(self) -> dict[str, object]:
@@ -431,12 +437,12 @@ class DesktopApp:
             return True
         if self.bridge.quitting:
             return True
-        self.bridge.quitting = True
-        if self.tray_icon is not None:
-            threading.Thread(
-                target=lambda: call_window(self.tray_icon, "stop"), daemon=True
-            ).start()
-        return True
+        self.bridge.hide_window()
+        return False
+
+    def _on_window_shown(self, *_: object) -> None:
+        if self.bridge.window is not None:
+            evaluate_js(self.bridge.window, "scheduleResize()")
 
     def _start_tray(self) -> bool:
         try:
@@ -465,18 +471,16 @@ class DesktopApp:
         return True
 
     def _show_flyout_from_tray(self, *_: object) -> None:
-        self._position_flyout()
         self.bridge.show_window()
 
     def _toggle_voice_from_hotkey(self) -> dict[str, object]:
-        self._position_flyout()
         self.bridge.show_window()
         return self.bridge.toggle_voice_input()
 
     def _position_flyout(self) -> None:
         if self.bridge.window is None:
             return
-        position_flyout_window(self.bridge.window, FLYOUT_INITIAL_HEIGHT)
+        position_flyout_window(self.bridge.window, self.bridge._flyout_height)
 
     def _quit_from_tray(self, *_: object) -> None:
         self._quit()
@@ -617,6 +621,12 @@ def resize_window(window: object, width: int, height: int) -> None:
         method(width, height)
 
 
+def evaluate_js(window: object, script: str) -> None:
+    method = getattr(window, "evaluate_js", None)
+    if callable(method):
+        method(script)
+
+
 def clamp_flyout_height(height: int, work_area: Rect) -> int:
     available_height = max(
         FLYOUT_MIN_HEIGHT, work_area.bottom - work_area.top - (FLYOUT_MARGIN * 2)
@@ -631,8 +641,10 @@ def position_flyout_window(window: object, requested_height: int) -> int:
         max(320, work_area.right - work_area.left - (FLYOUT_MARGIN * 2)),
     )
     height = clamp_flyout_height(requested_height, work_area)
-    x = work_area.right - width - FLYOUT_MARGIN
-    y = work_area.bottom - height - FLYOUT_MARGIN
+    work_width = work_area.right - work_area.left
+    work_height = work_area.bottom - work_area.top
+    x = work_area.left + (work_width - width) // 2
+    y = work_area.top + (work_height - height) // 2
     resize_window(window, width, height)
     move_window(window, x, y)
     return height
@@ -701,362 +713,13 @@ def is_wsl() -> bool:
         return False
     return "microsoft" in version or "wsl" in version
 
+# The desktop UI (HTML + CSS + JS) lives in desktop.html next to this module.
+# This approach gives us:
+#   - Proper editor support: syntax highlighting, JS/CSS/TS tooling, formatting, etc.
+#   - Python formatters (Black, Ruff, etc.) no longer fight with a 22k-char inline string
+#     (they used to aggressively drop the "f" from f""" or reformat the embedded content).
+#   - Much smaller, more readable desktop.py.
+#   - Easier future work (you already had polished prototypes in tmp/*.html).
+_DESKTOP_HTML_PATH = Path(__file__).with_name("desktop.html")
+DESKTOP_HTML: str = _DESKTOP_HTML_PATH.read_text(encoding="utf-8")
 
-DESKTOP_HTML = f"""
-<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Tomo</title>
-<style>
-:root {{
-  --ink: #ffffff;
-  --muted: rgba(23, 26, 29, .62);
-  --line: rgba(23, 26, 29, .14);
-  --glass: rgba(255, 255, 255, .2);
-  --user: rgba(18, 63, 53, .2);
-  --accent: #2f8f67;
-  --danger: #9b2f2f;
-  --tool: #26323a;
-}}
-* {{ box-sizing: border-box; }}
-* {{ scrollbar-width: none; }}
-*::-webkit-scrollbar {{ display: none; }}
-html, body {{ min-height: 0; margin: 0; background: transparent; }}
-body {{
-  background: transparent;
-  color: var(--ink);
-  font-family: "Aptos", "Segoe UI", sans-serif;
-  font-size: 14px;
-  overflow: hidden;
-}}
-button {{ font: inherit; }}
-.shell {{ display: block; }}
-.meta-row {{ padding: 8px 4px 0; }}
-.meta {{ color: var(--muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
-main {{ min-height: 0; display: grid; grid-template-rows: auto auto; }}
-#transcript {{ overflow-y: auto; padding: 18px 16px 14px; }}
-.msg {{ width: fit-content; max-width: 88%; margin: 0 0 14px; }}
-.msg.user {{ margin-left: 0; }}
-.bubble {{
-  padding: 11px 12px;
-  border: 1px solid var(--line);
-  background: var(--glass);
-  backdrop-filter: blur(18px);
-  -webkit-backdrop-filter: blur(18px);
-  border-radius: 8px;
-  line-height: 1.45;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}}
-.user .bubble {{ background: var(--user); color: var(--ink); border-color: rgba(18, 63, 53, .2); }}
-.speaker {{ font-size: 11px; color: var(--muted); margin: 0 0 4px 2px; }}
-.user .speaker {{ text-align: left; margin-right: 2px; }}
-.images {{ display: grid; gap: 8px; margin-top: 8px; }}
-.images img {{ max-width: 100%; border-radius: 6px; border: 1px solid var(--line); }}
-.tools-message {{ width: fit-content; max-width: 88%; }}
-.tools-bubble {{
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: rgba(255, 255, 255, .24);
-  backdrop-filter: blur(18px);
-  -webkit-backdrop-filter: blur(18px);
-  color: var(--ink);
-  overflow: hidden;
-}}
-.tools-bubble summary {{
-  cursor: pointer;
-  padding: 9px 11px;
-  color: rgba(255, 255, 255, .9);
-  font-size: 12px;
-  list-style: none;
-}}
-.tools-bubble summary::-webkit-details-marker {{ display: none; }}
-.tools-bubble summary::before {{ content: ">"; display: inline-block; margin-right: 7px; color: #82e1b1; }}
-.tools-bubble[open] summary::before {{ transform: rotate(90deg); }}
-.tool-list {{
-  display: grid;
-  gap: 6px;
-  padding: 0 11px 10px;
-  font-family: "Cascadia Mono", "Consolas", monospace;
-  font-size: 12px;
-}}
-.tool-row {{ color: rgba(255, 255, 255, .82); overflow-wrap: anywhere; }}
-#approval {{ display: none; border-top: 1px solid var(--line); background: #fff7df; padding: 12px 14px; }}
-#approval.visible {{ display: block; }}
-#approval-title {{ font-weight: 700; margin-bottom: 5px; }}
-#approval-body {{ color: #4b4430; white-space: pre-wrap; overflow-wrap: anywhere; }}
-.approval-actions {{ display: flex; gap: 8px; margin-top: 10px; }}
-.composer {{ padding: 12px; }}
-button {{
-  background: transparent;
-  color: white;
-  border: 1px solid var(--line);
-  border-radius: 7px;
-  padding: 0 14px;
-  cursor: pointer;
-}}
-button.secondary {{ background: transparent; color: var(--ink); }}
-button.danger {{ background: var(--danger); border-color: var(--danger); }}
-.voice-button {{
-  width: fit-content;
-  min-height: 44px;
-  padding: 0 16px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  background: transparent;
-  backdrop-filter: blur(18px);
-  -webkit-backdrop-filter: blur(18px);
-  color: var(--ink);
-  font-weight: 650;
-}}
-.voice-button svg {{ width: 17px; height: 17px; stroke-width: 2; }}
-.voice-button.listening,
-.voice-button.sending,
-.voice-button.working {{ background: transparent; border-color: var(--accent); color: var(--accent); }}
-button:disabled {{ opacity: .45; cursor: default; }}
-.empty {{ display: none; }}
-</style>
-</head>
-<body>
-<div class="shell">
-  <main>
-    <div id="transcript"><div class="empty">No messages yet.</div></div>
-    <div id="bottom-panel">
-      <div id="approval">
-        <div id="approval-title">Approval required</div>
-        <div id="approval-body"></div>
-        <div class="approval-actions">
-          <button id="approve">Approve</button>
-          <button id="deny" class="danger">Deny</button>
-        </div>
-      </div>
-      <div class="composer" id="composer">
-        <button id="voice" class="voice-button secondary" type="button" title="Speak" aria-label="Speak">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true">
-            <path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3Z"></path>
-            <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
-            <path d="M12 19v3"></path>
-          </svg>
-          <span id="voice-label">Speak</span>
-        </button>
-        <div class="meta-row">
-          <div class="meta" id="meta">{html.escape(settings.model)}</div>
-        </div>
-      </div>
-    </div>
-  </main>
-</div>
-<script>
-const transcript = document.getElementById('transcript');
-const bottomPanel = document.getElementById('bottom-panel');
-const meta = document.getElementById('meta');
-const composer = document.getElementById('composer');
-const approval = document.getElementById('approval');
-const approvalBody = document.getElementById('approval-body');
-const approve = document.getElementById('approve');
-const deny = document.getElementById('deny');
-const voice = document.getElementById('voice');
-const voiceLabel = document.getElementById('voice-label');
-let busy = false;
-let pendingApproval = null;
-let voiceState = 'idle';
-let streamingBubble = null;
-let currentToolGroup = null;
-let resizeTimer = null;
-
-function api() {{ return window.pywebview.api; }}
-function setBusy(value) {{
-  busy = value;
-  voice.disabled = value || !!pendingApproval;
-  voice.classList.toggle('working', value);
-  if (value) {{
-    voiceLabel.textContent = 'Sending';
-    voice.title = 'Sending';
-    voice.setAttribute('aria-label', voice.title);
-  }} else {{
-    updateVoiceButton();
-  }}
-}}
-function clearEmpty() {{
-  const empty = transcript.querySelector('.empty');
-  if (empty) empty.remove();
-}}
-function scrollBottom() {{ transcript.scrollTop = transcript.scrollHeight; }}
-async function resizeFlyout() {{
-  const maxHeight = 700;
-  const naturalTranscriptHeight = Math.max(transcript.scrollHeight, transcript.offsetHeight);
-  const bottomHeight = bottomPanel.offsetHeight;
-  const naturalHeight = Math.ceil(naturalTranscriptHeight + bottomHeight);
-  const targetHeight = Math.max(96, Math.min(maxHeight, naturalHeight));
-  const transcriptHeight = Math.max(0, targetHeight - bottomHeight);
-  transcript.style.maxHeight = `${{transcriptHeight}}px`;
-  transcript.style.overflowY = naturalTranscriptHeight > transcriptHeight ? 'auto' : 'hidden';
-  try {{
-    if (api().resize_flyout) await api().resize_flyout(targetHeight);
-  }} catch (_) {{}}
-  scrollBottom();
-}}
-function scheduleResize() {{
-  clearTimeout(resizeTimer);
-  resizeTimer = setTimeout(resizeFlyout, 0);
-}}
-function addMessage(role, text, images = []) {{
-  clearEmpty();
-  streamingBubble = null;
-  if (role === 'user') currentToolGroup = null;
-  const row = document.createElement('section');
-  row.className = `msg ${{role}}`;
-  const speaker = document.createElement('div');
-  speaker.className = 'speaker';
-  speaker.textContent = role === 'user' ? 'You' : 'Tomo';
-  const bubble = document.createElement('div');
-  bubble.className = 'bubble';
-  bubble.textContent = text || '';
-  row.append(speaker, bubble);
-  if (images.length) {{
-    const imageWrap = document.createElement('div');
-    imageWrap.className = 'images';
-    for (const url of images) {{
-      const img = document.createElement('img');
-      img.src = url;
-      img.alt = 'Generated image';
-      imageWrap.appendChild(img);
-    }}
-    row.appendChild(imageWrap);
-  }}
-  transcript.appendChild(row);
-  scrollBottom();
-  scheduleResize();
-  return bubble;
-}}
-function addDelta(text) {{
-  if (!streamingBubble) streamingBubble = addMessage('assistant', '');
-  streamingBubble.textContent += text;
-  scrollBottom();
-  scheduleResize();
-}}
-function addTool(event) {{
-  clearEmpty();
-  if (!currentToolGroup) {{
-    const row = document.createElement('section');
-    row.className = 'msg tools-message';
-    const details = document.createElement('details');
-    details.className = 'tools-bubble';
-    const summary = document.createElement('summary');
-    const list = document.createElement('div');
-    list.className = 'tool-list';
-    details.append(summary, list);
-    row.appendChild(details);
-    transcript.appendChild(row);
-    currentToolGroup = {{ count: 0, summary, list }};
-  }}
-  currentToolGroup.count += 1;
-  currentToolGroup.summary.textContent = `tools ${{currentToolGroup.count}} tool call${{currentToolGroup.count === 1 ? '' : 's'}}`;
-  const row = document.createElement('div');
-  row.className = 'tool-row';
-  row.textContent = `${{event.name}}: "${{event.input || ''}}"`;
-  currentToolGroup.list.appendChild(row);
-  scrollBottom();
-  scheduleResize();
-}}
-function showApproval(event) {{
-  pendingApproval = event.id;
-  approvalBody.textContent = `${{event.operation}} ${{event.target}}\\n\\n${{event.reason}}`;
-  approval.classList.add('visible');
-  setBusy(busy);
-  scheduleResize();
-}}
-function hideApproval() {{
-  pendingApproval = null;
-  approval.classList.remove('visible');
-  setBusy(busy);
-  scheduleResize();
-}}
-function setVoiceState(nextState) {{
-  voiceState = nextState || 'idle';
-  updateVoiceButton();
-  setBusy(busy);
-  scheduleResize();
-}}
-function updateVoiceButton() {{
-  voice.classList.toggle('listening', voiceState === 'listening');
-  voice.classList.toggle('sending', voiceState === 'sending');
-  voiceLabel.textContent = voiceState === 'listening' ? 'Cancel' : voiceState === 'sending' ? 'Stop' : 'Speak';
-  voice.title = voiceState === 'listening' ? 'Cancel listening' : voiceState === 'sending' ? 'Stop sending' : 'Speak';
-  voice.setAttribute('aria-label', voice.title);
-}}
-async function handleEvent(event) {{
-  if (event.type === 'busy') setBusy(event.busy);
-  if (event.type === 'user_message') addMessage('user', event.text);
-  if (event.type === 'assistant_delta') addDelta(event.text);
-  if (event.type === 'assistant_message') {{
-    if (streamingBubble) {{
-      if (event.images && event.images.length) {{
-        const imageWrap = document.createElement('div');
-        imageWrap.className = 'images';
-        for (const url of event.images) {{
-          const img = document.createElement('img');
-          img.src = url;
-          img.alt = 'Generated image';
-          imageWrap.appendChild(img);
-        }}
-        streamingBubble.parentElement.appendChild(imageWrap);
-      }}
-      streamingBubble = null;
-    }} else {{
-      addMessage('assistant', event.text, event.images || []);
-    }}
-  }}
-  if (event.type === 'tool_event') addTool(event);
-  if (event.type === 'approval_request') showApproval(event);
-  if (event.type === 'approval_resolved') hideApproval();
-  if (event.type === 'error') addMessage('assistant', `Error: ${{event.message}}`);
-  if (event.type === 'voice_state') {{
-    setVoiceState(event.state);
-  }}
-  if (event.type === 'voice_final') setVoiceState('sending');
-  if (event.type === 'voice_error') {{
-    setVoiceState('idle');
-    addMessage('assistant', `Voice input error: ${{event.message}}`);
-  }}
-}}
-async function poll() {{
-  try {{
-    const events = await api().poll_events();
-    for (const event of events) await handleEvent(event);
-  }} finally {{
-    setTimeout(poll, 180);
-  }}
-}}
-new ResizeObserver(scheduleResize).observe(bottomPanel);
-new ResizeObserver(scheduleResize).observe(transcript);
-voice.addEventListener('click', async () => {{
-  if (voiceState === 'listening' || voiceState === 'sending') {{
-    await api().cancel_voice_input();
-    setVoiceState('idle');
-    return;
-  }}
-  const result = await api().toggle_voice_input();
-  if (!result.ok) addMessage('assistant', result.error || 'Unable to start voice input.');
-}});
-approve.addEventListener('click', () => pendingApproval && api().resolve_approval(pendingApproval, true));
-deny.addEventListener('click', () => pendingApproval && api().resolve_approval(pendingApproval, false));
-window.addEventListener('pywebviewready', async () => {{
-  const data = await api().bootstrap();
-  if (data.ok) {{
-    meta.textContent = `${{data.model}} - ${{data.session.name}} - ${{data.session.id.slice(0, 8)}}`;
-    for (const message of data.messages) addMessage(message.role === 'user' ? 'user' : 'assistant', message.text, message.images || []);
-    setVoiceState(data.voice_state || 'idle');
-    setBusy(data.busy);
-    scheduleResize();
-  }}
-  poll();
-}});
-</script>
-</body>
-</html>
-"""

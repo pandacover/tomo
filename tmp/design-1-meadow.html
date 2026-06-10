@@ -1,0 +1,500 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tomo • Meadow</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&amp;family=SF+Pro+Display:wght@400;500;600&amp;display=swap');
+    
+    :root {
+      --meadow-bg: #f4f7f0;
+      --card: #eef2e9;
+      --card-2: #e9efe3;
+      --accent: #4a9c75;
+      --accent-light: #d1e8d9;
+      --ink: #1f2420;
+      --muted: #5c665c;
+      --highlight: #3b82f6;
+    }
+    
+    body {
+      font-family: "Inter", "SF Pro Display", system-ui, -apple-system, sans-serif;
+    }
+    
+    .flyout {
+      width: 420px;
+      max-width: 100%;
+      box-shadow: 0 25px 60px -15px rgb(0 0 0 / 0.18), 0 10px 20px -8px rgb(0 0 0 / 0.1);
+      border-radius: 28px;
+      overflow: hidden;
+      background: #f4f7f0;
+    }
+    
+    .meadow-header {
+      background: linear-gradient(180deg, #eef2e9 0%, #e9efe3 100%);
+      border-bottom: 1px solid #d8e0d0;
+    }
+    
+    .soft-card {
+      background: #eef2e9;
+      border-radius: 20px;
+      box-shadow: 0 2px 6px -1px rgb(0 0 0 / 0.06), 0 1px 2px -1px rgb(0 0 0 / 0.04);
+      border: 1px solid #d8e0d0;
+    }
+    
+    .message-card {
+      background: #f8faf5;
+      border: 1px solid #d8e0d0;
+      border-radius: 18px;
+      box-shadow: 0 1px 3px -1px rgb(0 0 0 / 0.05);
+    }
+    
+    .user-card {
+      background: #e6f0e2;
+      border: 1px solid #c9d9c6;
+    }
+    
+    .inspiration-rule {
+      background: #eef2e9;
+      border: 1px solid #d4dccb;
+      border-radius: 16px;
+      box-shadow: 0 4px 12px -2px rgb(0 0 0 / 0.08), 0 2px 4px -2px rgb(0 0 0 / 0.04);
+    }
+    
+    .chat-scroll {
+      scrollbar-width: thin;
+      scrollbar-color: #c9d9c6 transparent;
+    }
+    
+    .chat-scroll::-webkit-scrollbar {
+      width: 5px;
+    }
+    .chat-scroll::-webkit-scrollbar-thumb {
+      background-color: #c9d9c6;
+      border-radius: 20px;
+    }
+    
+    .tomo-bubble {
+      transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+    
+    .voice-btn {
+      width: 52px;
+      height: 52px;
+      background: #1f2420;
+      color: white;
+      border-radius: 9999px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      box-shadow: 0 6px 16px -4px rgb(31 36 32 / 0.4);
+      transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+    
+    .voice-btn:hover {
+      transform: scale(1.03);
+      box-shadow: 0 8px 20px -4px rgb(31 36 32 / 0.45);
+    }
+    
+    .voice-btn.listening {
+      background: #e11d48;
+      animation: pulse 1.8s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+    }
+    
+    .voice-btn.sending {
+      background: #4a9c75;
+    }
+    
+    .section-label {
+      font-size: 10px;
+      letter-spacing: 0.5px;
+      font-weight: 600;
+      color: #5c665c;
+    }
+    
+    .nature-bg {
+      background-image: 
+        linear-gradient(180deg, #f4f7f0 0%, #f0f4eb 100%);
+    }
+    
+    .tag {
+      font-size: 12px;
+      padding: 1px 9px;
+      border-radius: 999px;
+      background: #dbe7ff;
+      color: #1e40af;
+      font-weight: 600;
+    }
+    
+    .msg {
+      max-width: 82%;
+      animation: fadeIn 0.2s ease forwards;
+    }
+    
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(4px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    
+    .desktop-frame {
+      background: #e8e9e3;
+      padding: 16px;
+      border-radius: 36px;
+    }
+  </style>
+</head>
+<body class="bg-[#e8e9e3] flex items-center justify-center min-h-screen p-8">
+  <div class="desktop-frame">
+    <!-- Flyout Window -->
+    <div class="flyout mx-auto shadow-2xl">
+      
+      <!-- Top bar -->
+      <div class="px-5 pt-4 pb-2 flex items-center justify-between meadow-header">
+        <div class="flex items-center gap-x-3">
+          <div class="flex items-center gap-x-2">
+            <div class="w-7 h-7 rounded-2xl bg-[#4a9c75] flex items-center justify-center">
+              <i class="fa-solid fa-leaf text-white text-[15px]"></i>
+            </div>
+            <div>
+              <div class="font-semibold tracking-[-0.2px] text-[#1f2420] text-[17px]">Tomo</div>
+              <div class="text-[10px] text-[#5c665c] -mt-0.5">meadow</div>
+            </div>
+          </div>
+        </div>
+        
+        <div class="flex items-center gap-x-1.5">
+          <!-- Model pill -->
+          <div class="flex items-center bg-white/70 rounded-3xl px-3 py-1 text-xs border border-[#d8e0d0]">
+            <div class="w-1.5 h-1.5 bg-[#4a9c75] rounded-full mr-1.5"></div>
+            <span class="font-medium text-[#1f2420] text-[12px]">grok-4.3</span>
+          </div>
+          
+          <button onclick="showSettings()" 
+                  class="w-8 h-8 flex items-center justify-center text-[#5c665c] hover:text-[#1f2420] hover:bg-white/60 rounded-2xl transition-colors">
+            <i class="fa-solid fa-cog text-sm"></i>
+          </button>
+        </div>
+      </div>
+
+      <!-- Inspired Rule / Context Banner -->
+      <div class="px-4 pt-3 pb-1">
+        <div class="inspiration-rule px-4 py-3.5">
+          <div class="flex items-start justify-between gap-3">
+            <div class="flex-1 min-w-0">
+              <div class="flex items-center gap-x-2 mb-1">
+                <div class="flex -space-x-1">
+                  <div class="w-5 h-5 rounded-full bg-[#1f2420] flex items-center justify-center ring-2 ring-[#eef2e9]">
+                    <i class="fa-solid fa-file text-[10px] text-white"></i>
+                  </div>
+                  <div class="w-5 h-5 rounded-full bg-[#4a9c75] flex items-center justify-center ring-2 ring-[#eef2e9]">
+                    <i class="fa-solid fa-book text-[10px] text-white"></i>
+                  </div>
+                </div>
+                <div class="font-semibold text-[#1f2420] text-[13px] tracking-[-0.1px]">Workspace synced to Tomo memory</div>
+              </div>
+              <div class="text-[12.5px] leading-snug text-[#4b5148]">
+                Also add files tagged as 
+                <span onclick="highlightTag(this)" class="tag cursor-pointer">enhancement</span> 
+                to the active context
+              </div>
+            </div>
+            
+            <div class="flex items-center gap-x-1 pt-0.5">
+              <button onclick="editRule(this)" 
+                      class="w-7 h-7 flex items-center justify-center text-[#5c665c] hover:text-[#1f2420] hover:bg-white rounded-xl transition-all">
+                <i class="fa-solid fa-pencil text-[12px]"></i>
+              </button>
+              <button onclick="deleteRule(this)"
+                      class="w-7 h-7 flex items-center justify-center text-[#5c665c] hover:text-[#9b2f2f] hover:bg-white rounded-xl transition-all">
+                <i class="fa-solid fa-trash text-[12px]"></i>
+              </button>
+              <div onclick="toggleRule(this)" 
+                   class="w-7 h-7 ml-0.5 bg-[#1f2420] rounded-full flex items-center justify-center cursor-pointer ring-1 ring-offset-2 ring-offset-[#eef2e9] ring-[#1f2420]/30">
+                <i class="fa-solid fa-check text-white text-[10px]"></i>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Chat area -->
+      <div id="chat" 
+           class="chat-scroll h-[380px] px-4 py-5 overflow-y-auto bg-[#f4f7f0] space-y-3.5">
+        
+        <!-- Initial messages -->
+        <div class="msg flex justify-start">
+          <div class="message-card px-4 py-3 text-[#1f2420] text-[13.5px]">
+            Hey Tomo, I just pushed the new desktop UI branch. Can you review the latest changes in the flyout?
+          </div>
+        </div>
+        
+        <div class="msg flex justify-end">
+          <div class="user-card px-4 py-3 text-[#1f2420] text-[13.5px]">
+            Sure — checking the branch now.
+          </div>
+        </div>
+        
+        <div class="msg flex justify-start">
+          <div class="message-card px-4 py-3 text-[#1f2420] text-[13.5px]">
+            <div class="mb-1">I see the current glassmorphic design. The new meadow direction feels much warmer.</div>
+            <div class="text-[11px] text-[#5c665c] mt-2 flex items-center gap-1">
+              <i class="fa-solid fa-folder-open"></i> 
+              <span>Read 3 files in src/tomo</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Composer -->
+      <div class="px-4 pb-4 pt-2 bg-[#f4f7f0]">
+        <div class="flex items-end gap-2.5">
+          <div class="flex-1 bg-white border border-[#d8e0d0] rounded-3xl px-4 py-2.5 shadow-sm">
+            <input id="input" 
+                   type="text" 
+                   class="w-full bg-transparent text-[14px] text-[#1f2420] placeholder-[#8a9285] outline-none"
+                   placeholder="Message Tomo..."
+                   onkeydown="if (event.key === 'Enter') sendMessage()">
+          </div>
+          
+          <button onclick="sendMessage()"
+                  class="w-10 h-10 flex-shrink-0 bg-[#4a9c75] hover:bg-[#3d8a66] text-white rounded-3xl flex items-center justify-center shadow-sm active:scale-[0.985] transition-all">
+            <i class="fa-solid fa-arrow-up"></i>
+          </button>
+          
+          <button id="voice-btn"
+                  onclick="toggleVoice()"
+                  class="voice-btn flex-shrink-0">
+            <i class="fa-solid fa-microphone text-lg"></i>
+          </button>
+        </div>
+        
+        <div class="flex items-center justify-between px-1 mt-2">
+          <div class="flex items-center gap-x-2 text-[10px]">
+            <div class="px-2 py-px rounded-full bg-white/70 text-[#5c665c] text-[10px] font-medium">Ctrl+Space voice</div>
+          </div>
+          <div class="text-[10px] text-[#7c8678]">3 messages • 4m ago</div>
+        </div>
+      </div>
+      
+    </div>
+  </div>
+
+  <script>
+    function initTailwind() {
+      document.documentElement.style.setProperty('--accent', '#4a9c75');
+    }
+    
+    let voiceState = 'idle';
+    
+    function toggleVoice() {
+      const btn = document.getElementById('voice-btn');
+      const chat = document.getElementById('chat');
+      
+      if (voiceState === 'idle') {
+        voiceState = 'listening';
+        btn.classList.add('listening');
+        btn.innerHTML = '<i class="fa-solid fa-stop text-lg"></i>';
+        
+        // Simulate listening
+        setTimeout(() => {
+          if (voiceState === 'listening') {
+            const heard = "Review the new desktop UI changes on this branch";
+            appendUserMessage(heard);
+            voiceState = 'idle';
+            btn.classList.remove('listening');
+            btn.innerHTML = '<i class="fa-solid fa-microphone text-lg"></i>';
+            
+            setTimeout(() => {
+              appendAssistantMessage("Done. The meadow design feels really fresh — the soft cards and context banner are a lovely touch.");
+            }, 650);
+          }
+        }, 1350);
+      } else if (voiceState === 'listening') {
+        voiceState = 'idle';
+        btn.classList.remove('listening');
+        btn.innerHTML = '<i class="fa-solid fa-microphone text-lg"></i>';
+      }
+    }
+    
+    function sendMessage() {
+      const input = document.getElementById('input');
+      const text = input.value.trim();
+      if (!text) return;
+      
+      appendUserMessage(text);
+      input.value = '';
+      
+      setTimeout(() => {
+        const replies = [
+          "Got it. I’m looking at the changes now.",
+          "Interesting direction. The softer radii really change the feeling.",
+          "I can pull the latest diff if you want a line-by-line review.",
+          "The meadow palette works beautifully with the nature inspiration."
+        ];
+        appendAssistantMessage(replies[Math.floor(Math.random() * replies.length)]);
+      }, 620);
+    }
+    
+    function appendUserMessage(text) {
+      const chat = document.getElementById('chat');
+      const div = document.createElement('div');
+      div.className = 'msg flex justify-end';
+      div.innerHTML = `
+        <div class="user-card px-4 py-3 text-[#1f2420] text-[13.5px]">
+          ${escapeHtml(text)}
+        </div>
+      `;
+      chat.appendChild(div);
+      chat.scrollTop = chat.scrollHeight;
+    }
+    
+    function appendAssistantMessage(text) {
+      const chat = document.getElementById('chat');
+      const div = document.createElement('div');
+      div.className = 'msg flex justify-start';
+      div.innerHTML = `
+        <div class="message-card px-4 py-3 text-[#1f2420] text-[13.5px]">
+          ${escapeHtml(text)}
+        </div>
+      `;
+      chat.appendChild(div);
+      chat.scrollTop = chat.scrollHeight;
+    }
+    
+    function escapeHtml(str) {
+      return str.replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+    }
+    
+    function highlightTag(el) {
+      el.style.transition = 'all .15s ease';
+      const orig = el.style.background;
+      el.style.background = '#bfdbfe';
+      setTimeout(() => {
+        el.style.background = orig || '#dbe7ff';
+      }, 380);
+      
+      const chat = document.getElementById('chat');
+      chat.scrollTop = chat.scrollHeight;
+    }
+    
+    function editRule(btn) {
+      const card = btn.closest('.inspiration-rule');
+      card.style.transition = 'all .2s ease';
+      card.style.boxShadow = '0 0 0 3px #4a9c7533';
+      
+      setTimeout(() => {
+        const newText = prompt("Edit the automation rule:", "Also add files tagged as enhancement to the active context");
+        if (newText) {
+          const desc = card.querySelector('.text-\\[12\\.5px\\]');
+          if (desc) desc.innerHTML = newText.replace('enhancement', '<span onclick="highlightTag(this)" class="tag cursor-pointer">enhancement</span>');
+        }
+        card.style.boxShadow = '0 4px 12px -2px rgb(0 0 0 / 0.08), 0 2px 4px -2px rgb(0 0 0 / 0.04)';
+      }, 180);
+    }
+    
+    function deleteRule(btn) {
+      const card = btn.closest('.inspiration-rule');
+      card.style.transition = 'all .2s ease';
+      card.style.opacity = '0';
+      card.style.transform = 'translateY(-6px)';
+      setTimeout(() => card.remove(), 200);
+    }
+    
+    function toggleRule(el) {
+      const icon = el.querySelector('i');
+      if (icon.classList.contains('fa-check')) {
+        el.style.background = '#d1d5db';
+        el.style.boxShadow = 'none';
+        icon.classList.remove('fa-check');
+        icon.classList.add('fa-times');
+        icon.style.color = '#4b5563';
+      } else {
+        el.style.background = '#1f2420';
+        el.style.boxShadow = '';
+        icon.classList.remove('fa-times');
+        icon.classList.add('fa-check');
+        icon.style.color = 'white';
+      }
+    }
+    
+    function showSettings() {
+      const modal = document.createElement('div');
+      modal.className = 'fixed inset-0 bg-black/30 flex items-center justify-center z-50';
+      modal.innerHTML = `
+        <div class="soft-card w-[300px] p-5 text-sm">
+          <div class="font-semibold mb-3 text-base">Settings</div>
+          <div class="space-y-3 text-[#1f2420]">
+            <div class="flex justify-between items-center">
+              <span>Voice hotkey</span>
+              <span class="font-medium">Ctrl + Space</span>
+            </div>
+            <div class="flex justify-between items-center">
+              <span>Model</span>
+              <span class="font-medium text-[#4a9c75]">grok-4.3</span>
+            </div>
+            <div class="flex justify-between items-center">
+              <span>Theme</span>
+              <span class="font-medium">Meadow</span>
+            </div>
+          </div>
+          <button onclick="this.closest('.fixed').remove()" 
+                  class="mt-5 w-full py-2 rounded-2xl bg-[#1f2420] text-white text-sm font-medium">
+            Done
+          </button>
+        </div>
+      `;
+      document.body.appendChild(modal);
+      modal.onclick = (e) => { if (e.target === modal) modal.remove(); };
+    }
+    
+    function seedExtraMessage() {
+      // Optional: can be called for demo
+    }
+    
+    // Keyboard shortcut hint
+    function initKeyboard() {
+      document.addEventListener('keydown', (e) => {
+        if (e.key === '/' && document.activeElement.id !== 'input') {
+          e.preventDefault();
+          document.getElementById('input').focus();
+        }
+      });
+      
+      // Boot message hint (subtle)
+      setTimeout(() => {
+        const chat = document.getElementById('chat');
+        if (chat.children.length < 5) {
+          // already seeded enough
+        }
+      }, 1200);
+    }
+    
+    function init() {
+      initTailwind();
+      initKeyboard();
+      
+      // Make sure chat starts scrolled
+      const chat = document.getElementById('chat');
+      chat.scrollTop = chat.scrollHeight;
+      
+      // Demo: allow clicking the whole rule card area to focus composer
+      const rule = document.querySelector('.inspiration-rule');
+      if (rule) {
+        rule.addEventListener('click', (e) => {
+          if (!e.target.closest('button')) {
+            document.getElementById('input').focus();
+          }
+        });
+      }
+      
+      // Welcome toast on first load (subtle)
+      console.log('%c[Meadow] Tomo desktop prototype ready — light organic design', 'color:#5c665c');
+    }
+    
+    window.onload = init;
+  </script>
+</body>
+</html>

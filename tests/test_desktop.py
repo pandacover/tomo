@@ -211,7 +211,7 @@ def test_desktop_bridge_rejects_duplicate_voice_input():
     assert bridge.start_voice_input() == {"ok": False, "error": "Voice input is already listening."}
 
 
-def test_desktop_bridge_resize_flyout_clamps_and_bottom_aligns(monkeypatch):
+def test_desktop_bridge_resize_flyout_clamps_and_centers(monkeypatch):
     bridge = DesktopBridge(tomo=FakeTomo())
     window = FakeWindow()
     bridge.set_window(window)
@@ -220,7 +220,8 @@ def test_desktop_bridge_resize_flyout_clamps_and_bottom_aligns(monkeypatch):
     assert bridge.resize_flyout(900) == {"ok": True, "height": 700}
 
     assert window.size == (420, 700)
-    assert window.position == (1008, 188)
+    assert window.position == (510, 100)
+    assert bridge._flyout_height == 700
 
 
 def test_desktop_bridge_resize_flyout_uses_minimum_height(monkeypatch):
@@ -232,7 +233,7 @@ def test_desktop_bridge_resize_flyout_uses_minimum_height(monkeypatch):
     assert bridge.resize_flyout(20) == {"ok": True, "height": 96}
 
     assert window.size == (420, 96)
-    assert window.position == (1008, 792)
+    assert window.position == (510, 402)
 
 
 def test_desktop_bridge_voice_final_auto_sends_to_agent(monkeypatch):
@@ -349,15 +350,15 @@ def test_desktop_approval_responder_resolves_deny():
     assert result["approved"] is False
 
 
-def test_desktop_app_close_exits_on_native_windows():
+def test_desktop_app_close_hides_instead_of_quitting():
     bridge = DesktopBridge(tomo=FakeTomo())
     window = FakeWindow()
     bridge.set_window(window)
     app = DesktopApp(bridge=bridge, wsl_mode=False)
 
-    assert app.on_window_closing() is True
-    assert bridge.quitting is True
-    assert window.hidden is False
+    assert app.on_window_closing() is False
+    assert bridge.quitting is False
+    assert window.hidden is True
 
 
 def test_desktop_app_close_allows_explicit_quit():
@@ -390,20 +391,36 @@ def test_desktop_app_quit_destroys_window_and_stops_tray():
     assert speech.shutdown_called is True
 
 
-def test_desktop_app_tray_click_shows_bottom_right_flyout(monkeypatch):
+def test_desktop_app_tray_click_shows_centered_flyout(monkeypatch):
     bridge = DesktopBridge(tomo=FakeTomo())
     window = FakeWindow()
     bridge.set_window(window)
     app = DesktopApp(bridge=bridge, wsl_mode=False)
     monkeypatch.setattr("tomo.desktop.get_windows_work_area", lambda: Rect(0, 0, 1440, 900))
+    monkeypatch.setattr("tomo.desktop.evaluate_js", lambda *_: None)
 
     app._show_flyout_from_tray()
 
     assert window.size == (420, 132)
-    assert window.position == (1008, 756)
+    assert window.position == (510, 384)
     assert window.shown is True
     assert window.restored is True
     assert window.focused is True
+
+
+def test_desktop_app_reopen_restores_last_flyout_height(monkeypatch):
+    bridge = DesktopBridge(tomo=FakeTomo())
+    window = FakeWindow()
+    bridge.set_window(window)
+    app = DesktopApp(bridge=bridge, wsl_mode=False)
+    monkeypatch.setattr("tomo.desktop.get_windows_work_area", lambda: Rect(0, 0, 1440, 900))
+    monkeypatch.setattr("tomo.desktop.evaluate_js", lambda *_: None)
+
+    assert bridge.resize_flyout(500) == {"ok": True, "height": 500}
+    app._show_flyout_from_tray()
+
+    assert window.size == (420, 500)
+    assert window.position == (510, 200)
 
 
 def test_desktop_app_hotkey_shows_flyout_and_toggles_voice(monkeypatch):
@@ -413,11 +430,12 @@ def test_desktop_app_hotkey_shows_flyout_and_toggles_voice(monkeypatch):
     bridge.set_window(window)
     app = DesktopApp(bridge=bridge, wsl_mode=False)
     monkeypatch.setattr("tomo.desktop.get_windows_work_area", lambda: Rect(0, 0, 1440, 900))
+    monkeypatch.setattr("tomo.desktop.evaluate_js", lambda *_: None)
 
     assert app._toggle_voice_from_hotkey() == {"ok": True}
 
     assert window.size == (420, 132)
-    assert window.position == (1008, 756)
+    assert window.position == (510, 384)
     assert window.shown is True
     assert window.restored is True
     assert window.focused is True
