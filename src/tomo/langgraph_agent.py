@@ -41,8 +41,8 @@ MAX_REPAIR_ATTEMPTS = 2
 LANGGRAPH_SYSTEM_PROMPT = (
     SYSTEM_PROMPT
     + "\n\nLangGraph skill use:\n"
-    "- Before using the browser tool for screenshots, rendered UI validation, local dev server checks, or page text extraction, "
-    "read `skills/browser-tool/SKILL.md` with `read_file` when available and follow it.\n"
+    "- Before using the browser tool for screenshots, snapshots, rendered UI validation, local dev server checks, or page text extraction, "
+    "read `skills/browser-tool/SKILL.md` with `read_file` when available and follow the snapshot-and-ref workflow.\n"
 )
 
 

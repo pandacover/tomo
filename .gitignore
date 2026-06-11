@@ -4,6 +4,8 @@ MEMORY.md
 sessions/
 .env
 .venv/
+node_modules/
+package-lock.json
 __pycache__/
 *.py[cod]
 .python-version

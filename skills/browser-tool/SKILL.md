@@ -1,39 +1,82 @@
 ---
 name: browser-tool
-description: Use Tomo's browser tool reliably for rendered page validation, screenshots, page text extraction, and interactive web checks. Use when a task needs browser navigation, screenshots, local dev server validation, visual inspection, or page text from rendered JavaScript apps.
+description: Use Tomo's browser tool (agent-browser) for rendered page validation, snapshots, screenshots, and interactive web checks. Use when a task needs browser navigation, element refs, screenshots, local dev server validation, or page text from rendered JavaScript apps.
 ---
 
 # Browser Tool
 
-Use Tomo's `browser` tool for rendered pages, screenshots, UI validation, and client-side behavior.
+Tomo's `browser` tool drives **agent-browser** (headless Chromium). Prefer the snapshot-and-ref workflow over raw CSS selectors.
 
-## Required workflow
+## Core loop
 
-1. Navigate with `browser({"action": "navigate", "url": target_url})`, or pass `url` directly to `screenshot`, `text`, `html`, `evaluate`, or `title`.
-2. Wait for the page or target UI state:
-   - `browser({"action": "wait", "selector": "...", "timeout_ms": 10000})` for known elements.
-   - `browser({"action": "wait", "timeout_ms": 1000})` only for brief settling after navigation.
-3. Validate with at least one readback:
-   - `browser({"action": "text", "selector": "body"})`
-   - `browser({"action": "title"})`
-   - `browser({"action": "url"})`
-   - `browser({"action": "evaluate", "script": "..."})`
-4. For screenshots, save a named file and inspect the tool output URL/title before claiming success.
+1. `browser({"action": "navigate", "url": target_url})`
+2. `browser({"action": "snapshot"})` — read `@e1`, `@e2`, ... refs
+3. `browser({"action": "click", "selector": "@e3"})` or `fill` / `type`
+4. `browser({"action": "snapshot"})` again after any navigation or DOM change
+5. Validate with `text`, `title`, `url`, or `evaluate`
+6. `browser({"action": "screenshot", "path": "validation.png", "full_page": false})`
+
+Refs go stale after page changes. Always re-snapshot before the next ref interaction.
+
+## Actions
+
+| Action | Purpose |
+|--------|---------|
+| `navigate` | Open a URL |
+| `snapshot` | Interactive accessibility tree with `@eN` refs |
+| `click` / `fill` / `type` / `press` / `scroll` | Interact (selector or x/y for click) |
+| `screenshot` | Save image; pass `url` to navigate first |
+| `text` / `html` / `evaluate` | Read page content |
+| `wait` | Wait for selector or milliseconds |
+| `title` / `url` | Page metadata |
+| `batch` | Run multiple agent-browser commands in one call |
+| `close` | Tear down all browser sessions |
+
+## Batch (multi-step in one call)
+
+```json
+{
+  "action": "batch",
+  "commands": [
+    "open https://example.com",
+    "wait --load domcontentloaded",
+    "snapshot -i",
+    "screenshot example.png"
+  ]
+}
+```
+
+Use `batch` for navigate → wait → snapshot → screenshot sequences. Stops on first error (`--bail`).
 
 ## Screenshot rules
 
 - Do not screenshot `about:blank`.
-- Prefer a descriptive path such as `mkbhd-youtube-channel.png` or `validation-homepage.png`.
-- Use `full_page: false` for viewport screenshots unless the user specifically needs the full scroll height.
-- If the user gives a URL and asks for a screenshot, this call is valid:
+- Prefer descriptive paths: `validation-homepage.png`.
+- Use `full_page: false` for viewport shots unless full scroll height is needed.
+- Confirm URL/title or page text after saving; a saved file alone is not proof.
 
 ```json
 {"action": "screenshot", "url": "https://example.com", "path": "example.png", "full_page": false}
 ```
 
+## CSS selector fallback
+
+When snapshot refs fail, use CSS selectors or semantic finds via `batch`:
+
+```json
+{"action": "batch", "commands": ["find role button click --name Submit"]}
+```
+
 ## Validation rules
 
-- A tool response that only says a file was saved is not enough. Confirm the URL/title, page text, or rendered state.
-- If the screenshot is blank, retry by navigating explicitly, waiting for `body`, and using `full_page: false`.
-- If a browser tool call errors, do not claim success. Retry once with a simpler sequence: `close`, `navigate`, `wait`, `text`, `screenshot`.
+- Confirm URL/title, snapshot output, or page text before claiming success.
+- If a browser call errors, do not claim success. Retry once: `close`, `navigate`, `snapshot`, `text`, `screenshot`.
+- If install errors mention missing Chrome, run `npx agent-browser install` from the Tomo repo.
 
+## Setup
+
+```bash
+npm install
+npx agent-browser install
+npx agent-browser doctor
+```
