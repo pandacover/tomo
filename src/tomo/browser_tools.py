@@ -7,9 +7,12 @@ import shlex
 import shutil
 import subprocess
 import threading
+import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlparse
 from weakref import WeakKeyDictionary
 
 from langchain_core.tools import tool
@@ -37,9 +40,11 @@ BrowserAction = Literal[
     "close",
 ]
 DEFAULT_SCREENSHOT_PATH = "browser-screenshot.png"
-DEFAULT_TIMEOUT_MS = 10_000
+DEFAULT_TIMEOUT_MS = 30_000
+DEFAULT_SUBPROCESS_TIMEOUT_S = 45.0
 DEFAULT_VIEWPORT = (1440, 1000)
 REPO_ROOT = Path(__file__).resolve().parents[2]
+CLI_OUTPUT_DIR = REPO_ROOT / ".tomo" / "browser-cli"
 INSTALL_HINT = (
     "Install agent-browser: run `npm install` in the Tomo repo, then "
     "`npx agent-browser install`. Or: `npm install -g agent-browser && agent-browser install`."
@@ -76,17 +81,24 @@ def reset_browser_session() -> None:
         if session is not None:
             _initialized_sessions.discard(session)
     if session is not None:
-        run_agent_browser("close", check=False)
+        run_agent_browser("close", check=False, timeout_s=15)
 
 
 def reset_all_browser_sessions() -> None:
     with _sessions_lock:
         _sessions.clear()
         _initialized_sessions.clear()
-    run_agent_browser("close", "--all", check=False)
+    run_agent_browser("close", "--all", check=False, timeout_s=30)
 
 
 atexit.register(reset_all_browser_sessions)
+
+
+def _local_agent_browser_exe() -> Path | None:
+    if platform.system() != "Windows":
+        return None
+    exe = REPO_ROOT / "node_modules" / "agent-browser" / "bin" / "agent-browser-win32-x64.exe"
+    return exe if exe.exists() else None
 
 
 def resolve_agent_browser_command() -> list[str]:
@@ -94,11 +106,14 @@ def resolve_agent_browser_command() -> list[str]:
     if override:
         return shlex.split(override, posix=platform.system() != "Windows")
 
+    if local_exe := _local_agent_browser_exe():
+        return [str(local_exe)]
+
     local_names = ("agent-browser.cmd", "agent-browser") if platform.system() == "Windows" else ("agent-browser",)
     for name in local_names:
         candidate = REPO_ROOT / "node_modules" / ".bin" / name
         if candidate.exists():
-            return [candidate.as_posix()]
+            return [str(candidate)]
 
     if found := shutil.which("agent-browser"):
         return [found]
@@ -110,34 +125,106 @@ def resolve_agent_browser_command() -> list[str]:
     return ["agent-browser"]
 
 
-def run_agent_browser(*args: str, timeout_s: float | None = None, json_output: bool = False, check: bool = True) -> AgentBrowserResult:
+def operation_timeout_s(timeout_ms: int, *, minimum: float = DEFAULT_SUBPROCESS_TIMEOUT_S) -> float:
+    return max(minimum, timeout_ms / 1000)
+
+
+def build_agent_browser_command(*args: str, json_output: bool = False) -> list[str]:
     command = [*resolve_agent_browser_command(), "--session", current_session_name()]
     if json_output:
         command.append("--json")
     command.extend(args)
+    return command
 
+
+def _read_text(path: Path) -> str:
+    if not path.exists():
+        return ""
+    return path.read_text(encoding="utf-8", errors="replace").strip()
+
+
+def _cleanup_cli_output_files(*paths: Path) -> None:
+    for path in paths:
+        for _ in range(10):
+            try:
+                path.unlink(missing_ok=True)
+                break
+            except OSError:
+                time.sleep(0.05)
+
+
+def _run_via_shell_redirect(command: list[str], timeout_s: float) -> AgentBrowserResult:
+    CLI_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    tag = uuid.uuid4().hex
+    out_file = CLI_OUTPUT_DIR / f"{tag}.out"
+    err_file = CLI_OUTPUT_DIR / f"{tag}.err"
+    shell = f'{subprocess.list2cmdline(command)} 1> "{out_file}" 2> "{err_file}"'
     try:
-        completed = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            timeout=timeout_s,
-            check=False,
+        completed = subprocess.run(shell, shell=True, timeout=timeout_s, check=False)
+        for _ in range(20):
+            time.sleep(0.05)
+            if out_file.exists() or err_file.exists():
+                break
+        return AgentBrowserResult(
+            returncode=completed.returncode,
+            stdout=_read_text(out_file),
+            stderr=_read_text(err_file),
         )
-    except FileNotFoundError as exc:
-        raise RuntimeError(INSTALL_HINT) from exc
-    except subprocess.TimeoutExpired as exc:
-        raise RuntimeError(f"agent-browser timed out after {timeout_s}s") from exc
+    finally:
+        _cleanup_cli_output_files(out_file, err_file)
 
-    result = AgentBrowserResult(
+
+def _run_via_subprocess(command: list[str], timeout_s: float) -> AgentBrowserResult:
+    completed = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        timeout=timeout_s,
+        check=False,
+    )
+    return AgentBrowserResult(
         returncode=completed.returncode,
         stdout=(completed.stdout or "").strip(),
         stderr=(completed.stderr or "").strip(),
     )
+
+
+def run_agent_browser(
+    *args: str,
+    timeout_s: float | None = None,
+    json_output: bool = False,
+    check: bool = True,
+) -> AgentBrowserResult:
+    command = build_agent_browser_command(*args, json_output=json_output)
+    effective_timeout = timeout_s if timeout_s is not None else DEFAULT_SUBPROCESS_TIMEOUT_S
+
+    try:
+        if platform.system() == "Windows":
+            result = _run_via_shell_redirect(command, effective_timeout)
+        else:
+            result = _run_via_subprocess(command, effective_timeout)
+    except FileNotFoundError as exc:
+        raise RuntimeError(INSTALL_HINT) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"agent-browser timed out after {effective_timeout}s") from exc
+
     if check and result.returncode != 0:
         detail = result.stderr or result.stdout or f"exit code {result.returncode}"
         raise RuntimeError(detail)
     return result
+
+
+def is_local_dev_url(url: str) -> bool:
+    host = (urlparse(url).hostname or "").lower()
+    return host in {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
+
+
+def wait_after_navigation(url: str, timeout_ms: int) -> None:
+    timeout_s = operation_timeout_s(timeout_ms)
+    if is_local_dev_url(url):
+        run_agent_browser("wait", "2000", timeout_s=timeout_s)
+        return
+    run_agent_browser("wait", "--load", "domcontentloaded", timeout_s=timeout_s)
 
 
 def ensure_browser_ready(timeout_ms: int = DEFAULT_TIMEOUT_MS) -> None:
@@ -148,33 +235,37 @@ def ensure_browser_ready(timeout_ms: int = DEFAULT_TIMEOUT_MS) -> None:
         _initialized_sessions.add(session)
 
     width, height = DEFAULT_VIEWPORT
-    run_agent_browser("set", "viewport", str(width), str(height), timeout_s=max(5, timeout_ms / 1000))
+    run_agent_browser("set", "viewport", str(width), str(height), timeout_s=operation_timeout_s(timeout_ms))
 
 
 def navigate_to(url: str, timeout_ms: int = DEFAULT_TIMEOUT_MS) -> None:
     ensure_browser_ready(timeout_ms)
-    run_agent_browser("open", url, timeout_s=max(10, timeout_ms / 1000))
-    run_agent_browser("wait", "--load", "domcontentloaded", timeout_s=max(10, timeout_ms / 1000))
+    timeout_s = operation_timeout_s(timeout_ms)
+    run_agent_browser("open", url, timeout_s=timeout_s)
+    wait_after_navigation(url, timeout_ms)
 
 
 def maybe_navigate_for_url(url: str | None, action: str, timeout_ms: int) -> str | None:
     if not url:
         return None
     navigate_to(url, timeout_ms)
-    settle = run_agent_browser("wait", "1000", timeout_s=max(5, timeout_ms / 1000), check=False)
-    if settle.returncode != 0:
-        return format_error(action, settle)
     return None
 
 
 def current_page_url(timeout_ms: int = DEFAULT_TIMEOUT_MS) -> str:
-    result = run_agent_browser("get", "url", timeout_s=max(5, timeout_ms / 1000))
+    result = run_agent_browser("get", "url", timeout_s=operation_timeout_s(timeout_ms))
+    for line in reversed(result.stdout.splitlines()):
+        stripped = line.strip()
+        if stripped.startswith("http://") or stripped.startswith("https://") or stripped == "about:blank":
+            return stripped
     return result.stdout.strip()
 
 
 def page_status(timeout_ms: int = DEFAULT_TIMEOUT_MS) -> str:
     url = current_page_url(timeout_ms)
-    title = run_agent_browser("get", "title", timeout_s=max(5, timeout_ms / 1000)).stdout.strip()
+    title = run_agent_browser("get", "title", timeout_s=operation_timeout_s(timeout_ms)).stdout.strip()
+    if "\n" in title:
+        title = title.splitlines()[-1].strip()
     return f"URL: {url}\nTitle: {title}"
 
 
@@ -210,7 +301,7 @@ def browser(
     y: int | None = None,
     scroll_y: int = 700,
     timeout_ms: int = DEFAULT_TIMEOUT_MS,
-    full_page: bool = True,
+    full_page: bool = False,
     commands: list[str] | None = None,
 ) -> str:
     """Use agent-browser (headless Chromium) for rendered web UI work.
@@ -220,7 +311,7 @@ html, evaluate, wait, title, url, reload, back, forward, batch, close.
 Prefer snapshot to discover @eN refs, then click/fill those refs. Re-snapshot
 after navigation or DOM changes. Use batch for multi-step flows in one call.
 """
-    timeout_s = max(5, timeout_ms / 1000)
+    timeout_s = operation_timeout_s(timeout_ms)
     try:
         if action == "close":
             reset_all_browser_sessions()
@@ -231,7 +322,7 @@ after navigation or DOM changes. Use batch for multi-step flows in one call.
                 return "Error: browser batch requires commands."
             ensure_browser_ready(timeout_ms)
             args = ["batch", "--bail", *commands]
-            result = run_agent_browser(*args, timeout_s=max(timeout_s, 30), check=False)
+            result = run_agent_browser(*args, timeout_s=max(timeout_s, 60), check=False)
             if result.returncode != 0:
                 return format_error("batch", result)
             output = result.stdout or "Batch completed."
@@ -356,7 +447,7 @@ after navigation or DOM changes. Use batch for multi-step flows in one call.
             result = run_agent_browser("get", "title", timeout_s=timeout_s, check=False)
             if result.returncode != 0:
                 return format_error("title", result)
-            return result.stdout
+            return result.stdout.splitlines()[-1].strip() if result.stdout else ""
 
         if action == "url":
             return current_page_url(timeout_ms)
@@ -365,21 +456,21 @@ after navigation or DOM changes. Use batch for multi-step flows in one call.
             result = run_agent_browser("reload", timeout_s=timeout_s, check=False)
             if result.returncode != 0:
                 return format_error("reload", result)
-            run_agent_browser("wait", "--load", "domcontentloaded", timeout_s=timeout_s, check=False)
+            run_agent_browser("wait", "2000", timeout_s=timeout_s, check=False)
             return page_status(timeout_ms)
 
         if action == "back":
             result = run_agent_browser("back", timeout_s=timeout_s, check=False)
             if result.returncode != 0:
                 return format_error("back", result)
-            run_agent_browser("wait", "--load", "domcontentloaded", timeout_s=timeout_s, check=False)
+            run_agent_browser("wait", "2000", timeout_s=timeout_s, check=False)
             return page_status(timeout_ms)
 
         if action == "forward":
             result = run_agent_browser("forward", timeout_s=timeout_s, check=False)
             if result.returncode != 0:
                 return format_error("forward", result)
-            run_agent_browser("wait", "--load", "domcontentloaded", timeout_s=timeout_s, check=False)
+            run_agent_browser("wait", "2000", timeout_s=timeout_s, check=False)
             return page_status(timeout_ms)
 
         return f"Error: unknown browser action {action}."

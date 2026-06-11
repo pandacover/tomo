@@ -112,17 +112,15 @@ def test_browser_screenshot_with_url_navigates_before_capture(tmp_path, monkeypa
         "set viewport 1440 1000": AgentBrowserResult(0, "", ""),
         "open https://example.com": AgentBrowserResult(0, "", ""),
         "wait --load domcontentloaded": AgentBrowserResult(0, "", ""),
-        "wait 1000": AgentBrowserResult(0, "", ""),
         "get url": AgentBrowserResult(0, "https://example.com", ""),
         "get title": AgentBrowserResult(0, "Fake Title", ""),
-        f"screenshot --full {target.as_posix()}": AgentBrowserResult(0, "", ""),
+        f"screenshot {target.as_posix()}": AgentBrowserResult(0, "", ""),
     }
 
     result = browser.invoke({"action": "screenshot", "url": "https://example.com", "path": target.as_posix()})
 
     assert result == f"Screenshot saved: {target}\nURL: https://example.com\nTitle: Fake Title"
     assert ("open", "https://example.com") in [call[0] for call in runner.calls]
-    assert ("wait", "1000") in [call[0] for call in runner.calls]
 
 
 def test_browser_text_with_url_navigates_before_reading(monkeypatch):
@@ -131,7 +129,6 @@ def test_browser_text_with_url_navigates_before_reading(monkeypatch):
         "set viewport 1440 1000": AgentBrowserResult(0, "", ""),
         "open https://example.com": AgentBrowserResult(0, "", ""),
         "wait --load domcontentloaded": AgentBrowserResult(0, "", ""),
-        "wait 1000": AgentBrowserResult(0, "", ""),
         "get text main": AgentBrowserResult(0, "body text timeout=10000", ""),
     }
 
@@ -207,13 +204,20 @@ def test_browser_sessions_are_keyed_by_thread_object_not_reused_ident(monkeypatc
 
 
 def test_resolve_agent_browser_prefers_repo_local_binary(monkeypatch, tmp_path):
-    bin_dir = tmp_path / "node_modules" / ".bin"
-    bin_dir.mkdir(parents=True)
-    local_bin = bin_dir / ("agent-browser.cmd" if __import__("platform").system() == "Windows" else "agent-browser")
-    local_bin.write_text("", encoding="utf-8")
+    if __import__("platform").system() == "Windows":
+        exe_dir = tmp_path / "node_modules" / "agent-browser" / "bin"
+        exe_dir.mkdir(parents=True)
+        local_bin = exe_dir / "agent-browser-win32-x64.exe"
+        local_bin.write_text("", encoding="utf-8")
+        expected = [str(local_bin)]
+    else:
+        bin_dir = tmp_path / "node_modules" / ".bin"
+        bin_dir.mkdir(parents=True)
+        local_bin = bin_dir / "agent-browser"
+        local_bin.write_text("", encoding="utf-8")
+        expected = [str(local_bin)]
+
     monkeypatch.setattr(browser_tools, "REPO_ROOT", tmp_path)
     monkeypatch.delenv("AGENT_BROWSER_BIN", raising=False)
 
-    command = browser_tools.resolve_agent_browser_command()
-
-    assert command == [local_bin.as_posix()]
+    assert browser_tools.resolve_agent_browser_command() == expected
