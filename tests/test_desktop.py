@@ -147,6 +147,7 @@ def test_desktop_api_exposes_only_narrow_bridge_methods():
         "bootstrap",
         "cancel_voice_input",
         "hide_window",
+        "log_client_event",
         "poll_events",
         "quit_app",
         "resize_flyout",
@@ -159,6 +160,7 @@ def test_desktop_api_exposes_only_narrow_bridge_methods():
     ]
     assert api.bootstrap()["ok"] is True
     assert api.poll_events() == []
+    assert api.log_client_event("mounted", {"kind": "test"}) == {"ok": True}
 
 
 def test_desktop_bridge_send_message_rejects_empty_text():
@@ -443,17 +445,64 @@ def test_desktop_app_hotkey_shows_flyout_and_toggles_voice(monkeypatch):
 
 
 def test_desktop_html_renders_tools_in_transcript_without_status_label():
-    assert 'id="tools"' not in desktop.DESKTOP_HTML
-    assert 'id="state"' not in desktop.DESKTOP_HTML
-    assert "Working" not in desktop.DESKTOP_HTML
-    assert "tools-bubble" in desktop.DESKTOP_HTML
-    assert "currentToolGroup" in desktop.DESKTOP_HTML
-    assert "scrollbar-width: none" in desktop.DESKTOP_HTML
-    assert 'id="voice-panel"' not in desktop.DESKTOP_HTML
-    assert "Listening..." not in desktop.DESKTOP_HTML
-    assert "Cancel listening" in desktop.DESKTOP_HTML
-    assert "Stop sending" in desktop.DESKTOP_HTML
-    assert "voiceLabel.textContent = 'Sending'" in desktop.DESKTOP_HTML
+    fallback_html = desktop._DESKTOP_HTML_PATH.read_text(encoding="utf-8")
+
+    assert 'id="tools"' not in fallback_html
+    assert 'id="state"' not in fallback_html
+    assert "Working" not in fallback_html
+    assert "tools-bubble" in fallback_html
+    assert "currentToolGroup" in fallback_html
+    assert "scrollbar-width: none" in fallback_html
+    assert 'id="voice-panel"' not in fallback_html
+    assert "Listening..." not in fallback_html
+    assert "Cancel listening" in fallback_html
+    assert "Stop sending" in fallback_html
+
+
+def test_load_desktop_html_prefers_react_dist(monkeypatch, tmp_path):
+    dist = tmp_path / "desktop_dist" / "index.html"
+    fallback = tmp_path / "desktop.html"
+    dist.parent.mkdir()
+    dist.write_text("<html>react</html>", encoding="utf-8")
+    fallback.write_text("<html>fallback</html>", encoding="utf-8")
+    monkeypatch.setattr(desktop, "_DESKTOP_DIST_INDEX", dist)
+    monkeypatch.setattr(desktop, "_DESKTOP_HTML_PATH", fallback)
+
+    assert desktop.load_desktop_html() == "<html>react</html>"
+
+
+def test_load_desktop_html_inlines_react_dist_assets(monkeypatch, tmp_path):
+    dist = tmp_path / "desktop_dist"
+    assets = dist / "assets"
+    fallback = tmp_path / "desktop.html"
+    assets.mkdir(parents=True)
+    (assets / "index-demo.js").write_text("window.demo = true;", encoding="utf-8")
+    (assets / "index-demo.css").write_text("body { color: red; }", encoding="utf-8")
+    (dist / "index.html").write_text(
+        '<html><head><script type="module" crossorigin src="./assets/index-demo.js"></script>'
+        '<link rel="stylesheet" crossorigin href="./assets/index-demo.css"></head><body></body></html>',
+        encoding="utf-8",
+    )
+    fallback.write_text("<html>fallback</html>", encoding="utf-8")
+    monkeypatch.setattr(desktop, "_DESKTOP_DIST_INDEX", dist / "index.html")
+    monkeypatch.setattr(desktop, "_DESKTOP_HTML_PATH", fallback)
+
+    html = desktop.load_desktop_html()
+
+    assert '<script type="module">window.demo = true;</script>' in html
+    assert "<style>body { color: red; }</style>" in html
+    assert "./assets/index-demo.js" not in html
+    assert "./assets/index-demo.css" not in html
+
+
+def test_load_desktop_html_falls_back_to_plain_html(monkeypatch, tmp_path):
+    dist = tmp_path / "desktop_dist" / "index.html"
+    fallback = tmp_path / "desktop.html"
+    fallback.write_text("<html>fallback</html>", encoding="utf-8")
+    monkeypatch.setattr(desktop, "_DESKTOP_DIST_INDEX", dist)
+    monkeypatch.setattr(desktop, "_DESKTOP_HTML_PATH", fallback)
+
+    assert desktop.load_desktop_html() == "<html>fallback</html>"
 
 
 def test_cli_desktop_refuses_when_not_logged_in(monkeypatch, capsys):
@@ -481,6 +530,68 @@ def test_cli_desktop_calls_run_desktop_when_logged_in(monkeypatch):
     cli.main()
 
     assert calls == ["desktop"]
+
+
+def test_cli_desktop_start_calls_background_start_when_logged_in(monkeypatch):
+    from tomo import cli
+
+    calls = []
+    monkeypatch.setattr(sys, "argv", ["tomo", "desktop", "start"])
+    monkeypatch.setattr("tomo.token_store.load_tokens", lambda: object())
+    monkeypatch.setattr(cli, "start_desktop", lambda: calls.append("start"))
+
+    cli.main()
+
+    assert calls == ["start"]
+
+
+def test_cli_desktop_stop_does_not_require_login(monkeypatch):
+    from tomo import cli
+
+    calls = []
+    monkeypatch.setattr(sys, "argv", ["tomo", "desktop", "stop"])
+    monkeypatch.setattr("tomo.token_store.load_tokens", lambda: None)
+    monkeypatch.setattr(cli, "stop_desktop", lambda: calls.append("stop"))
+
+    cli.main()
+
+    assert calls == ["stop"]
+
+
+def test_cli_desktop_restart_calls_background_restart_when_logged_in(monkeypatch):
+    from tomo import cli
+
+    calls = []
+    monkeypatch.setattr(sys, "argv", ["tomo", "desktop", "restart"])
+    monkeypatch.setattr("tomo.token_store.load_tokens", lambda: object())
+    monkeypatch.setattr(cli, "restart_desktop", lambda: calls.append("restart"))
+
+    cli.main()
+
+    assert calls == ["restart"]
+
+
+def test_start_desktop_refuses_duplicate_running_process(monkeypatch, tmp_path, capsys):
+    pid_path = tmp_path / "desktop.pid"
+    pid_path.write_text("123\n", encoding="utf-8")
+    monkeypatch.setattr(desktop, "desktop_pid_path", lambda: pid_path)
+    monkeypatch.setattr(desktop, "process_is_running", lambda pid: pid == 123)
+
+    desktop.start_desktop()
+
+    assert "already running with PID 123" in capsys.readouterr().out
+
+
+def test_stop_desktop_removes_stale_pid(monkeypatch, tmp_path, capsys):
+    pid_path = tmp_path / "desktop.pid"
+    pid_path.write_text("123\n", encoding="utf-8")
+    monkeypatch.setattr(desktop, "desktop_pid_path", lambda: pid_path)
+    monkeypatch.setattr(desktop, "process_is_running", lambda pid: False)
+
+    desktop.stop_desktop()
+
+    assert not pid_path.exists()
+    assert "removed stale PID file" in capsys.readouterr().out
 
 
 def test_run_desktop_starts_app_in_wsl_mode(monkeypatch):

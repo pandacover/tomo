@@ -15,11 +15,21 @@ uv run tomo chat
 Launch the background tray chat app:
 
 ```bash
-uv run tomo desktop
+uv run tomo desktop start
 ```
 
-On native Windows, the desktop app opens from the Windows tray. Closing the chat window quits the desktop command, and
-the tray Quit action exits explicitly. In WSL, Tomo uses the Qt webview backend and opens the chat window directly; tray
+Stop or restart it without relying on Ctrl+C:
+
+```bash
+uv run tomo desktop stop
+uv run tomo desktop restart
+```
+
+The background desktop app writes its PID to `.tomo/desktop.pid` and logs to `.tomo/desktop.log`.
+`uv run tomo desktop` still runs the app in the foreground for debugging.
+
+On native Windows, the desktop app opens from the Windows tray. Closing the chat window hides it; use `uv run tomo desktop stop`
+or the tray Quit action to exit explicitly. In WSL, Tomo uses the Qt webview backend and opens the chat window directly; tray
 integration is best-effort because WSLg does not always expose a system tray to Linux apps.
 
 The desktop app supports text chat only.
@@ -49,6 +59,9 @@ uv run tomo logout
 uv run tomo auth-status
 uv run tomo chat
 uv run tomo desktop
+uv run tomo desktop start
+uv run tomo desktop stop
+uv run tomo desktop restart
 uv run tomo telegram start
 uv run tomo telegram stop
 uv run tomo telegram restart
