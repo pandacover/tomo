@@ -9,12 +9,13 @@ import threading
 import time
 from base64 import b64decode, b64encode
 from collections.abc import Iterable
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 import httpx
 
 from .config import settings
+from .cross_gateway_bridge import get_cross_gateway_bridge
 from .gateway import ToolCallLifecycleEvent, TomoGateway, UserContent, format_tool_input
 from .reasoning import (
     effective_reasoning_effort,
@@ -93,6 +94,37 @@ class TelegramGateway:
         self.busy_chats: set[str] = set()
         self.yolo_chats: set[str] = set()
         self.debug_tool_chats: set[str] = set()
+        channels = self._cross_gateway_channels()
+        get_cross_gateway_bridge().attach(
+            "telegram",
+            self,
+            default_channel_id=channels[0] if channels else "telegram:unknown",
+            channels=channels,
+        )
+
+    def _cross_gateway_channels(self) -> list[str]:
+        allowed = [str(chat_id) for chat_id in sorted(self.allowed_chat_ids)]
+        if allowed:
+            return allowed
+        sessions = getattr(self.tomo, "sessions", {})
+        if isinstance(sessions, dict):
+            return sorted(str(channel_id) for channel_id in sessions)
+        return []
+
+    def deliver_cross_gateway_message(self, channel_id: str, text: str, *, source_gateway: str) -> None:
+        self.send_message(channel_id, f"[from {source_gateway}] {text}")
+
+    def get_cross_gateway_context(self, channel_id: str) -> dict[str, object]:
+        session = self.tomo.get_session(channel_id)
+        return {
+            "session": asdict(session.metadata),
+            "messages": session.messages,
+        }
+
+    def list_cross_gateway_channels(self) -> list[str]:
+        sessions = getattr(self.tomo, "sessions", {})
+        session_channels = sorted(str(channel_id) for channel_id in sessions) if isinstance(sessions, dict) else []
+        return list(dict.fromkeys([*self._cross_gateway_channels(), *session_channels]))
 
     def run(self) -> None:
         offset: int | None = None
@@ -555,6 +587,12 @@ def start_telegram() -> None:
     if existing_pid is not None and process_is_running(existing_pid):
         print(f"Telegram gateway is already running with PID {existing_pid}.")
         return
+    orphan_pids = find_telegram_process_ids()
+    if orphan_pids:
+        orphan_pid = orphan_pids[0]
+        write_pid(pid_path, orphan_pid)
+        print(f"Telegram gateway is already running with PID {orphan_pid}.")
+        return
     if existing_pid is not None:
         pid_path.unlink(missing_ok=True)
 
@@ -576,32 +614,88 @@ def start_telegram() -> None:
 
 def stop_telegram() -> None:
     pid_path = telegram_pid_path()
-    pid = read_pid(pid_path)
-    if pid is None:
+    targets = telegram_process_targets()
+    if not targets:
+        pid_path.unlink(missing_ok=True)
         print("Telegram gateway is not running.")
         return
-    if not process_is_running(pid):
-        pid_path.unlink(missing_ok=True)
-        print("Telegram gateway was not running; removed stale PID file.")
-        return
 
-    stop_process(pid, force=False)
-    deadline = time.monotonic() + 10
-    while time.monotonic() < deadline:
-        if not process_is_running(pid):
-            pid_path.unlink(missing_ok=True)
-            print("Telegram gateway stopped.")
-            return
-        time.sleep(0.1)
-
-    stop_process(pid, force=True)
+    stop_telegram_pids(targets)
     pid_path.unlink(missing_ok=True)
-    print("Telegram gateway stopped forcefully.")
+
+    remaining = find_telegram_process_ids()
+    if remaining:
+        stop_telegram_pids(remaining)
+        remaining = find_telegram_process_ids()
+
+    if remaining:
+        print(
+            "Telegram gateway could not be fully stopped. "
+            f"Remaining PIDs: {', '.join(str(pid) for pid in remaining)}"
+        )
+        return
+    print("Telegram gateway stopped.")
 
 
 def restart_telegram() -> None:
     stop_telegram()
     start_telegram()
+
+
+def telegram_process_targets() -> list[int]:
+    targets = set(find_telegram_process_ids())
+    recorded_pid = read_pid(telegram_pid_path())
+    if recorded_pid is not None:
+        targets.add(recorded_pid)
+    current_pid = os.getpid()
+    return sorted(pid for pid in targets if pid != current_pid)
+
+
+def stop_telegram_pids(pids: list[int]) -> None:
+    current_pid = os.getpid()
+    for pid in pids:
+        if pid == current_pid:
+            continue
+        stop_process(pid, force=True)
+
+
+def find_telegram_process_ids() -> list[int]:
+    if os.name != "nt":
+        return []
+
+    command = [
+        "powershell.exe",
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        (
+            "Get-CimInstance Win32_Process | "
+            "Where-Object { "
+            "$_.Name -eq 'python.exe' -and "
+            "$_.CommandLine -like '*tomo.telegram import run_telegram*' "
+            "} | "
+            "Select-Object -ExpandProperty ProcessId"
+        ),
+    ]
+    try:
+        result = subprocess.run(
+            command,
+            text=True,
+            capture_output=True,
+            timeout=10,
+            shell=False,
+        )
+    except Exception:  # noqa: BLE001
+        return []
+    pids: list[int] = []
+    for line in result.stdout.splitlines():
+        try:
+            pid = int(line.strip())
+        except ValueError:
+            continue
+        if pid != os.getpid():
+            pids.append(pid)
+    return sorted(set(pids))
 
 
 def telegram_pid_path() -> Path:
@@ -631,18 +725,27 @@ def stop_process(pid: int, *, force: bool) -> None:
             command.append("/F")
         subprocess.run(command, text=True, capture_output=True, timeout=30)
         return
-    os.kill(pid, signal.SIGKILL if force else signal.SIGTERM)
+    termination_signal = signal.SIGTERM
+    if force:
+        termination_signal = getattr(signal, "SIGKILL", signal.SIGTERM)
+    os.kill(pid, termination_signal)
 
 
 def process_is_running(pid: int) -> bool:
+    if os.name == "nt":
+        import ctypes
+
+        process_query_limited_information = 0x1000
+        handle = ctypes.windll.kernel32.OpenProcess(process_query_limited_information, False, pid)
+        if not handle:
+            return False
+        ctypes.windll.kernel32.CloseHandle(handle)
+        return True
+
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
         return False
     except PermissionError:
         return True
-    except OSError:
-        if os.name == "nt":
-            return False
-        raise
     return True

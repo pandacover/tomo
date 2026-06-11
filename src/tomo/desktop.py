@@ -1,9 +1,16 @@
 from __future__ import annotations
 
-import html
+from pathlib import Path
+
+import json
 import os
 import queue
+import logging
+import re
+import subprocess
+import sys
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import asdict
 from functools import cache
@@ -11,8 +18,11 @@ from typing import Any, NamedTuple
 from uuid import uuid4
 
 from .config import settings
-from .gateway import TomoGateway, format_tool_input
+from .cross_gateway_bridge import get_cross_gateway_bridge
+from .gateway import TomoGateway, UserContent, format_tool_input
+from .reasoning import effective_show_reasoning_trace
 from .speech import WindowsSpeechInput
+from .session_store import save_session
 from .tools import ApprovalRequest
 
 DESKTOP_CHANNEL_ID = "desktop:local"
@@ -28,7 +38,10 @@ WM_QUIT = 0x0012
 MOD_CONTROL = 0x0002
 MOD_NOREPEAT = 0x4000
 VK_SPACE = 0x20
+DESKTOP_PID_FILENAME = "desktop.pid"
+DESKTOP_LOG_FILENAME = "desktop.log"
 DesktopEvent = dict[str, Any]
+LOGGER = logging.getLogger("tomo.desktop")
 
 
 class Rect(NamedTuple):
@@ -116,12 +129,63 @@ class DesktopBridge:
         )
         self._voice_send_timer: threading.Timer | None = None
         self._pending_voice_text = ""
+        self._pending_message_images: list[str] = []
+        self._flyout_height = FLYOUT_INITIAL_HEIGHT
+        self._flyout_geometry: dict[str, int] = {}
         self._lock = threading.Lock()
+        get_cross_gateway_bridge().attach(
+            "desktop",
+            self,
+            default_channel_id=self.channel_id,
+            channels=[self.channel_id],
+        )
+
+    def deliver_cross_gateway_message(self, channel_id: str, text: str, *, source_gateway: str) -> None:
+        display_text = f"[from {source_gateway}] {text}"
+        session = self.tomo.get_session(channel_id)
+        session.messages.append({"role": "assistant", "content": display_text})
+        save_session(session)
+        event: DesktopEvent = {
+            "type": "cross_gateway_message",
+            "channel_id": channel_id,
+            "source": source_gateway,
+            "text": text,
+        }
+        LOGGER.info(
+            "bridge.cross_gateway_message source=%s channel=%s chars=%s",
+            source_gateway,
+            channel_id,
+            len(text),
+        )
+        self.emitter(event)
+        self._push_event_to_ui(event)
+        self.show_window()
+
+    def _push_event_to_ui(self, event: DesktopEvent) -> None:
+        if self.window is None:
+            return
+        payload = json.dumps(event, ensure_ascii=True)
+        evaluate_js(
+            self.window,
+            f"window.__tomoDispatchEvent && window.__tomoDispatchEvent({payload})",
+        )
+
+    def get_cross_gateway_context(self, channel_id: str) -> dict[str, object]:
+        session = self.tomo.get_session(channel_id)
+        return {
+            "session": asdict(session.metadata),
+            "messages": session.messages,
+        }
+
+    def list_cross_gateway_channels(self) -> list[str]:
+        return [self.channel_id]
 
     def set_window(self, window: object) -> None:
+        LOGGER.info("bridge.set_window window=%s", type(window).__name__)
         self.window = window
 
     def bootstrap(self) -> dict[str, object]:
+        LOGGER.info("bridge.bootstrap busy=%s voice_state=%s", self.busy, self.voice_state)
         session = self.tomo.get_session(self.channel_id)
         return {
             "ok": True,
@@ -134,27 +198,50 @@ class DesktopBridge:
         }
 
     def poll_events(self) -> list[DesktopEvent]:
-        return self.emitter.drain()
+        events = self.emitter.drain()
+        if events:
+            LOGGER.info("bridge.poll_events count=%s types=%s", len(events), [event.get("type") for event in events])
+        return events
 
-    def send_message(self, text: str) -> dict[str, object]:
+    def set_pending_message_images(self, images: list[str] | None) -> dict[str, object]:
+        self._pending_message_images = normalize_message_images(images)
+        LOGGER.info("bridge.set_pending_message_images count=%s", len(self._pending_message_images))
+        return {"ok": True}
+
+    def send_message(self, text: str, images: list[str] | None = None) -> dict[str, object]:
         text = text.strip()
-        if not text:
+        normalized_images = normalize_message_images(images)
+        if not text and not normalized_images:
             return {"ok": False, "error": "Message cannot be empty."}
         with self._lock:
             if self.busy:
                 return {"ok": False, "error": "Tomo is still working."}
             self.busy = True
+        display_text = text or ("attached images" if normalized_images else "")
+        content = build_user_content(text, normalized_images)
+        LOGGER.info(
+            "bridge.send_message accepted chars=%s images=%s",
+            len(text),
+            len(normalized_images),
+        )
         self.emitter({"type": "busy", "busy": True})
-        self.emitter({"type": "user_message", "text": text})
-        thread = threading.Thread(target=self._send_worker, args=(text,), daemon=True)
+        self.emitter(
+            {
+                "type": "user_message",
+                "text": display_text,
+                "images": normalized_images,
+            }
+        )
+        thread = threading.Thread(target=self._send_worker, args=(content,), daemon=True)
         thread.start()
         return {"ok": True}
 
-    def _send_worker(self, text: str) -> None:
+    def _send_worker(self, content: UserContent) -> None:
         try:
-            reply = self.tomo.send_text_with_events(
+            LOGGER.info("bridge.worker.start multimodal=%s", isinstance(content, list))
+            reply = self.tomo.send_user_content_with_events(
                 self.channel_id,
-                text,
+                content,
                 on_event=lambda event: self.emitter(
                     {
                         "type": "tool_event",
@@ -167,8 +254,22 @@ class DesktopBridge:
                 ),
             )
         except Exception as exc:  # noqa: BLE001
+            LOGGER.exception("bridge.worker.error")
             self.emitter({"type": "error", "message": str(exc)})
         else:
+            LOGGER.info("bridge.worker.reply text_chars=%s images=%s", len(reply.text), len(reply.images))
+            trace_overrides = getattr(self.tomo, "channel_trace_override", {})
+            if effective_show_reasoning_trace(
+                chat_override=trace_overrides.get(self.channel_id)
+                if isinstance(trace_overrides, dict)
+                else None
+            ) and reply.trace.reasoning_summary:
+                self.emitter(
+                    {
+                        "type": "reasoning_event",
+                        "text": reply.trace.reasoning_summary,
+                    }
+                )
             self.emitter(
                 {
                     "type": "assistant_message",
@@ -179,6 +280,7 @@ class DesktopBridge:
         finally:
             with self._lock:
                 self.busy = False
+            LOGGER.info("bridge.worker.done")
             self.emitter({"type": "busy", "busy": False})
 
     def resolve_approval(self, approval_id: str, approved: bool) -> dict[str, object]:
@@ -218,27 +320,45 @@ class DesktopBridge:
 
     def resize_flyout(self, height: int | float) -> dict[str, object]:
         if self.window is None:
+            LOGGER.warning("bridge.resize_flyout rejected window_unavailable requested=%r", height)
             return {"ok": False, "error": "Window is unavailable."}
         try:
             requested_height = int(height)
         except (TypeError, ValueError):
+            LOGGER.warning("bridge.resize_flyout rejected invalid_height=%r", height)
             return {"ok": False, "error": "Invalid flyout height."}
-        actual_height = position_flyout_window(self.window, requested_height)
+        actual_height = position_flyout_window(
+            self.window,
+            requested_height,
+            geometry=self._flyout_geometry,
+        )
+        self._flyout_height = actual_height
+        LOGGER.info("bridge.resize_flyout requested=%s actual=%s", requested_height, actual_height)
         return {"ok": True, "height": actual_height}
 
     def show_window(self) -> dict[str, object]:
+        LOGGER.info("bridge.show_window window_available=%s height=%s", self.window is not None, self._flyout_height)
         if self.window is not None:
+            position_flyout_window(
+                self.window,
+                self._flyout_height,
+                geometry=self._flyout_geometry,
+            )
             call_window(self.window, "show")
             call_window(self.window, "restore")
             call_window(self.window, "focus")
+            evaluate_js(self.window, "window.scheduleResize && window.scheduleResize()")
+            LOGGER.info("bridge.show_window completed")
         return {"ok": True}
 
     def hide_window(self) -> dict[str, object]:
+        LOGGER.info("bridge.hide_window window_available=%s", self.window is not None)
         if self.window is not None:
             call_window(self.window, "hide")
         return {"ok": True}
 
     def quit_app(self) -> dict[str, object]:
+        LOGGER.info("bridge.quit_app")
         self.quitting = True
         self._shutdown_speech_input()
         if self.quit_callback is not None:
@@ -249,6 +369,7 @@ class DesktopBridge:
         return {"ok": True}
 
     def _handle_voice_state(self, state: str) -> None:
+        LOGGER.info("bridge.voice_state state=%s", state)
         self.voice_state = state
         self.emitter({"type": "voice_state", "state": state})
 
@@ -257,7 +378,7 @@ class DesktopBridge:
 
     def _handle_voice_final(self, text: str) -> None:
         text = text.strip()
-        if not text:
+        if not text and not self._pending_message_images:
             self._handle_voice_state("idle")
             return
         self._cancel_pending_voice_send()
@@ -277,6 +398,7 @@ class DesktopBridge:
         self._voice_send_timer.start()
 
     def _handle_voice_error(self, message: str) -> None:
+        LOGGER.warning("bridge.voice_error message=%s", message)
         self._cancel_pending_voice_send()
         self.voice_state = "idle"
         self.emitter({"type": "voice_error", "message": message})
@@ -285,12 +407,14 @@ class DesktopBridge:
     def _send_pending_voice_text(self) -> None:
         with self._lock:
             text = self._pending_voice_text
+            images = list(self._pending_message_images)
             self._pending_voice_text = ""
+            self._pending_message_images = []
             self._voice_send_timer = None
-        if not text:
+        if not text and not images:
             return
         self._handle_voice_state("idle")
-        result = self.send_message(text)
+        result = self.send_message(text, images or None)
         if not result.get("ok"):
             self.emitter(
                 {
@@ -327,8 +451,11 @@ class DesktopApi:
     def poll_events(self) -> list[DesktopEvent]:
         return self._bridge.poll_events()
 
-    def send_message(self, text: str) -> dict[str, object]:
-        return self._bridge.send_message(text)
+    def send_message(self, text: str, images: list[str] | None = None) -> dict[str, object]:
+        return self._bridge.send_message(text, images)
+
+    def set_pending_message_images(self, images: list[str] | None) -> dict[str, object]:
+        return self._bridge.set_pending_message_images(images)
 
     def resolve_approval(self, approval_id: str, approved: bool) -> dict[str, object]:
         return self._bridge.resolve_approval(approval_id, approved)
@@ -357,6 +484,10 @@ class DesktopApi:
     def quit_app(self) -> dict[str, object]:
         return self._bridge.quit_app()
 
+    def log_client_event(self, message: str, details: object | None = None) -> dict[str, object]:
+        LOGGER.info("client.%s details=%r", message, details)
+        return {"ok": True}
+
 
 class DesktopApp:
     def __init__(
@@ -369,14 +500,29 @@ class DesktopApp:
         self.wsl_mode = is_wsl() if wsl_mode is None else wsl_mode
 
     def run(self) -> None:
+        configure_desktop_logging()
+        LOGGER.info("app.run start pid=%s wsl_mode=%s", os.getpid(), self.wsl_mode)
         os.environ.setdefault("QT_API", "pyside6")
         validate_qt_backend()
         import webview
 
-        window = webview.create_window("Tomo", **self._window_options())
+        options = self._window_options()
+        LOGGER.info(
+            "app.create_window hidden=%s frameless=%s transparent=%s size=%sx%s html_chars=%s",
+            options.get("hidden"),
+            options.get("frameless"),
+            options.get("transparent"),
+            options.get("width"),
+            options.get("height"),
+            len(str(options.get("html", ""))),
+        )
+        window = webview.create_window("Tomo", **options)
         self.bridge.set_window(window)
         window.events.closing += self.on_window_closing
+        window.events.shown += self._on_window_shown
+        LOGGER.info("app.webview.start")
         webview.start(self._on_webview_started, window, gui="qt")
+        LOGGER.info("app.webview.stopped")
 
     def _window_options(self) -> dict[str, object]:
         if self.wsl_mode:
@@ -414,6 +560,7 @@ class DesktopApp:
         }
 
     def _on_webview_started(self, window: object) -> None:
+        LOGGER.info("app.webview.started callback")
         self.bridge.set_window(window)
         if self.wsl_mode:
             print(
@@ -426,17 +573,19 @@ class DesktopApp:
         self._start_hotkey()
 
     def on_window_closing(self, *_: object) -> bool:
+        LOGGER.info("app.window.closing wsl_mode=%s quitting=%s", self.wsl_mode, self.bridge.quitting)
         if self.wsl_mode:
             self.bridge.quitting = True
             return True
         if self.bridge.quitting:
             return True
-        self.bridge.quitting = True
-        if self.tray_icon is not None:
-            threading.Thread(
-                target=lambda: call_window(self.tray_icon, "stop"), daemon=True
-            ).start()
-        return True
+        self.bridge.hide_window()
+        return False
+
+    def _on_window_shown(self, *_: object) -> None:
+        LOGGER.info("app.window.shown")
+        if self.bridge.window is not None:
+            evaluate_js(self.bridge.window, "window.scheduleResize && window.scheduleResize()")
 
     def _start_tray(self) -> bool:
         try:
@@ -455,7 +604,9 @@ class DesktopApp:
                 ),
             )
             self.tray_icon.run_detached()
+            LOGGER.info("app.tray.started")
         except Exception as exc:  # noqa: BLE001
+            LOGGER.exception("app.tray.error")
             if self.wsl_mode:
                 print(
                     f"Tomo desktop tray integration is unavailable in this WSL session: {exc}"
@@ -465,23 +616,31 @@ class DesktopApp:
         return True
 
     def _show_flyout_from_tray(self, *_: object) -> None:
-        self._position_flyout()
+        LOGGER.info("app.tray.open_clicked")
         self.bridge.show_window()
 
     def _toggle_voice_from_hotkey(self) -> dict[str, object]:
-        self._position_flyout()
+        LOGGER.info("app.hotkey.toggle_voice")
         self.bridge.show_window()
         return self.bridge.toggle_voice_input()
 
     def _position_flyout(self) -> None:
         if self.bridge.window is None:
+            LOGGER.warning("app.position_flyout skipped window_unavailable")
             return
-        position_flyout_window(self.bridge.window, FLYOUT_INITIAL_HEIGHT)
+        LOGGER.info("app.position_flyout height=%s", self.bridge._flyout_height)
+        position_flyout_window(
+            self.bridge.window,
+            self.bridge._flyout_height,
+            geometry=self.bridge._flyout_geometry,
+        )
 
     def _quit_from_tray(self, *_: object) -> None:
+        LOGGER.info("app.tray.quit_clicked")
         self._quit()
 
     def _quit(self) -> None:
+        LOGGER.info("app.quit")
         self.bridge.quitting = True
         if self.hotkey is not None:
             self.hotkey.stop()
@@ -496,9 +655,11 @@ class DesktopApp:
         try:
             started = self.hotkey.start()
         except Exception as exc:  # noqa: BLE001
+            LOGGER.exception("app.hotkey.error")
             print(f"Tomo desktop hotkey Ctrl+Space is unavailable: {exc}")
             return False
         if not started:
+            LOGGER.warning("app.hotkey.unavailable error=%s", self.hotkey.error or "registration failed")
             print(
                 "Tomo desktop hotkey Ctrl+Space is unavailable: "
                 f"{self.hotkey.error or 'registration failed'}"
@@ -562,6 +723,30 @@ class GlobalVoiceHotkey:
             user32.UnregisterHotKey(None, VOICE_HOTKEY_ID)
 
 
+def normalize_message_images(images: list[str] | None) -> list[str]:
+    if not images:
+        return []
+    normalized: list[str] = []
+    for image in images:
+        if not isinstance(image, str):
+            continue
+        url = image.strip()
+        if url:
+            normalized.append(url)
+    return normalized
+
+
+def build_user_content(text: str, images: list[str]) -> UserContent:
+    if not images:
+        return text
+    parts: list[dict[str, Any]] = []
+    if text:
+        parts.append({"type": "text", "text": text})
+    for url in images:
+        parts.append({"type": "image_url", "image_url": {"url": url}})
+    return parts
+
+
 def message_to_dto(message: dict[str, Any]) -> dict[str, Any]:
     role = str(message.get("role", "assistant"))
     content = message.get("content", "")
@@ -602,19 +787,46 @@ def structured_content_images(content: object) -> list[str]:
 def call_window(target: object, method_name: str) -> None:
     method = getattr(target, method_name, None)
     if callable(method):
-        method()
+        LOGGER.info("window.%s begin", method_name)
+        try:
+            method()
+        except Exception:  # noqa: BLE001
+            LOGGER.exception("window.%s error", method_name)
+            raise
+        LOGGER.info("window.%s done", method_name)
+        return
+    LOGGER.warning("window.%s unavailable target=%s", method_name, type(target).__name__)
 
 
 def move_window(window: object, x: int, y: int) -> None:
     method = getattr(window, "move", None)
     if callable(method):
+        LOGGER.info("window.move x=%s y=%s", x, y)
         method(x, y)
+        return
+    LOGGER.warning("window.move unavailable target=%s", type(window).__name__)
 
 
 def resize_window(window: object, width: int, height: int) -> None:
     method = getattr(window, "resize", None)
     if callable(method):
+        LOGGER.info("window.resize width=%s height=%s", width, height)
         method(width, height)
+        return
+    LOGGER.warning("window.resize unavailable target=%s", type(window).__name__)
+
+
+def evaluate_js(window: object, script: str) -> None:
+    method = getattr(window, "evaluate_js", None)
+    if callable(method):
+        try:
+            LOGGER.info("window.evaluate_js script=%s", script)
+            method(script)
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.exception("window.evaluate_js ignored_error script=%s", script)
+            print(f"Tomo desktop ignored JavaScript evaluation error: {exc}")
+        return
+    LOGGER.warning("window.evaluate_js unavailable target=%s", type(window).__name__)
 
 
 def clamp_flyout_height(height: int, work_area: Rect) -> int:
@@ -624,17 +836,51 @@ def clamp_flyout_height(height: int, work_area: Rect) -> int:
     return min(FLYOUT_MAX_HEIGHT, available_height, max(FLYOUT_MIN_HEIGHT, height))
 
 
-def position_flyout_window(window: object, requested_height: int) -> int:
+def position_flyout_window(
+    window: object,
+    requested_height: int,
+    *,
+    geometry: dict[str, int] | None = None,
+) -> int:
     work_area = get_windows_work_area()
     width = min(
         FLYOUT_WIDTH,
         max(320, work_area.right - work_area.left - (FLYOUT_MARGIN * 2)),
     )
     height = clamp_flyout_height(requested_height, work_area)
-    x = work_area.right - width - FLYOUT_MARGIN
-    y = work_area.bottom - height - FLYOUT_MARGIN
+    work_width = work_area.right - work_area.left
+    work_height = work_area.bottom - work_area.top
+    x = work_area.left + (work_width - width) // 2
+    y = work_area.top + (work_height - height) // 2
+    if geometry is not None:
+        unchanged = (
+            geometry.get("width") == width
+            and geometry.get("height") == height
+            and geometry.get("x") == x
+            and geometry.get("y") == y
+        )
+        if unchanged:
+            LOGGER.debug(
+                "window.position skipped unchanged width=%s height=%s x=%s y=%s",
+                width,
+                height,
+                x,
+                y,
+            )
+            return height
+    LOGGER.info(
+        "window.position requested_height=%s actual_width=%s actual_height=%s x=%s y=%s work_area=%s",
+        requested_height,
+        width,
+        height,
+        x,
+        y,
+        work_area,
+    )
     resize_window(window, width, height)
     move_window(window, x, y)
+    if geometry is not None:
+        geometry.update(width=width, height=height, x=x, y=y)
     return height
 
 
@@ -670,6 +916,203 @@ def run_desktop() -> None:
     DesktopApp(wsl_mode=is_wsl()).run()
 
 
+def configure_desktop_logging() -> None:
+    settings.data_dir.mkdir(parents=True, exist_ok=True)
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s [%(process)d:%(threadName)s] %(name)s: %(message)s",
+        handlers=[
+            logging.FileHandler(desktop_log_path(), encoding="utf-8"),
+            logging.StreamHandler(sys.stdout),
+        ],
+        force=True,
+    )
+    LOGGER.info("logging.configured log_path=%s", desktop_log_path())
+
+
+def start_desktop() -> None:
+    pid_path = desktop_pid_path()
+    existing_pid = read_pid(pid_path)
+    if existing_pid is not None and process_is_running(existing_pid):
+        print(f"Tomo desktop is already running with PID {existing_pid}.")
+        return
+    if existing_pid is not None:
+        pid_path.unlink(missing_ok=True)
+
+    settings.data_dir.mkdir(parents=True, exist_ok=True)
+    log_path = desktop_log_path()
+    log_file = log_path.open("ab")
+    log_file.write(
+        f"\n--- Tomo desktop start {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n".encode(
+            "utf-8"
+        )
+    )
+    log_file.flush()
+    process = subprocess.Popen(
+        [sys.executable, "-c", "from tomo.desktop import run_desktop; run_desktop()"],
+        stdin=subprocess.DEVNULL,
+        stdout=log_file,
+        stderr=subprocess.STDOUT,
+        creationflags=background_creation_flags(),
+        start_new_session=os.name != "nt",
+    )
+    log_file.close()
+    write_pid(pid_path, process.pid)
+    print(f"Tomo desktop started with PID {process.pid}.")
+    print(f"Logs: {log_path}")
+
+
+def stop_desktop() -> None:
+    pid_path = desktop_pid_path()
+    pid = read_pid(pid_path)
+    if pid is None:
+        orphan_pids = find_desktop_process_ids()
+        if not orphan_pids:
+            print("Tomo desktop is not running.")
+            return
+        stop_desktop_pids(orphan_pids)
+        print("Tomo desktop stopped.")
+        return
+    if not process_is_running(pid):
+        pid_path.unlink(missing_ok=True)
+        orphan_pids = find_desktop_process_ids()
+        if not orphan_pids:
+            print("Tomo desktop was not running; removed stale PID file.")
+            return
+        stop_desktop_pids(orphan_pids)
+        print("Tomo desktop stopped; removed stale PID file.")
+        return
+
+    stop_process(pid, force=False)
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        if not process_is_running(pid):
+            pid_path.unlink(missing_ok=True)
+            print("Tomo desktop stopped.")
+            return
+        time.sleep(0.1)
+
+    stop_process(pid, force=True)
+    pid_path.unlink(missing_ok=True)
+    print("Tomo desktop stopped forcefully.")
+
+
+def stop_desktop_pids(pids: list[int]) -> None:
+    current_pid = os.getpid()
+    for pid in pids:
+        if pid == current_pid or not process_is_running(pid):
+            continue
+        stop_process(pid, force=True)
+
+
+def find_desktop_process_ids() -> list[int]:
+    if os.name != "nt":
+        return []
+
+    command = [
+        "powershell.exe",
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        (
+            "Get-CimInstance Win32_Process | "
+            "Where-Object { $_.CommandLine -like '*from tomo.desktop import run_desktop*' } | "
+            "Select-Object -ExpandProperty ProcessId"
+        ),
+    ]
+    try:
+        result = subprocess.run(
+            command,
+            text=True,
+            capture_output=True,
+            timeout=10,
+            shell=False,
+        )
+    except Exception:  # noqa: BLE001
+        LOGGER.exception("desktop.find_process_ids.error")
+        return []
+    pids: list[int] = []
+    for line in result.stdout.splitlines():
+        try:
+            pid = int(line.strip())
+        except ValueError:
+            continue
+        if pid != os.getpid():
+            pids.append(pid)
+    return sorted(set(pids))
+
+
+def restart_desktop() -> None:
+    stop_desktop()
+    start_desktop()
+
+
+def desktop_pid_path() -> Path:
+    return settings.data_dir / DESKTOP_PID_FILENAME
+
+
+def desktop_log_path() -> Path:
+    return settings.data_dir / DESKTOP_LOG_FILENAME
+
+
+def background_creation_flags() -> int:
+    if os.name != "nt":
+        return 0
+    flags = subprocess.CREATE_NEW_PROCESS_GROUP
+    create_no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    return flags | create_no_window
+
+
+def read_pid(path: Path) -> int | None:
+    try:
+        return int(path.read_text(encoding="utf-8").strip())
+    except (FileNotFoundError, ValueError):
+        return None
+
+
+def write_pid(path: Path, pid: int) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"{pid}\n", encoding="utf-8")
+
+
+def stop_process(pid: int, *, force: bool) -> None:
+    if os.name == "nt":
+        command = ["taskkill", "/PID", str(pid), "/T"]
+        if force:
+            command.append("/F")
+        subprocess.run(command, text=True, capture_output=True, timeout=30)
+        return
+    import signal
+
+    os.kill(pid, signal.SIGKILL if force else signal.SIGTERM)
+
+
+def process_is_running(pid: int) -> bool:
+    if os.name == "nt":
+        import ctypes
+
+        process_query_limited_information = 0x1000
+        handle = ctypes.windll.kernel32.OpenProcess(
+            process_query_limited_information, False, pid
+        )
+        if not handle:
+            return False
+        ctypes.windll.kernel32.CloseHandle(handle)
+        return True
+
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        if os.name == "nt":
+            return False
+        raise
+    return True
+
+
 def validate_qt_backend() -> None:
     missing: list[str] = []
     for module_name in ("qtpy", "PySide6", "PySide6.QtWebEngineWidgets"):
@@ -701,362 +1144,50 @@ def is_wsl() -> bool:
         return False
     return "microsoft" in version or "wsl" in version
 
+# The desktop UI now prefers the React/Vite build in desktop_dist, while keeping
+# desktop.html as a migration fallback when the frontend has not been built.
+_DESKTOP_DIST_INDEX = Path(__file__).with_name("desktop_dist").joinpath("index.html")
+_DESKTOP_HTML_PATH = Path(__file__).with_name("desktop.html")
 
-DESKTOP_HTML = f"""
-<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Tomo</title>
-<style>
-:root {{
-  --ink: #ffffff;
-  --muted: rgba(23, 26, 29, .62);
-  --line: rgba(23, 26, 29, .14);
-  --glass: rgba(255, 255, 255, .2);
-  --user: rgba(18, 63, 53, .2);
-  --accent: #2f8f67;
-  --danger: #9b2f2f;
-  --tool: #26323a;
-}}
-* {{ box-sizing: border-box; }}
-* {{ scrollbar-width: none; }}
-*::-webkit-scrollbar {{ display: none; }}
-html, body {{ min-height: 0; margin: 0; background: transparent; }}
-body {{
-  background: transparent;
-  color: var(--ink);
-  font-family: "Aptos", "Segoe UI", sans-serif;
-  font-size: 14px;
-  overflow: hidden;
-}}
-button {{ font: inherit; }}
-.shell {{ display: block; }}
-.meta-row {{ padding: 8px 4px 0; }}
-.meta {{ color: var(--muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
-main {{ min-height: 0; display: grid; grid-template-rows: auto auto; }}
-#transcript {{ overflow-y: auto; padding: 18px 16px 14px; }}
-.msg {{ width: fit-content; max-width: 88%; margin: 0 0 14px; }}
-.msg.user {{ margin-left: 0; }}
-.bubble {{
-  padding: 11px 12px;
-  border: 1px solid var(--line);
-  background: var(--glass);
-  backdrop-filter: blur(18px);
-  -webkit-backdrop-filter: blur(18px);
-  border-radius: 8px;
-  line-height: 1.45;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}}
-.user .bubble {{ background: var(--user); color: var(--ink); border-color: rgba(18, 63, 53, .2); }}
-.speaker {{ font-size: 11px; color: var(--muted); margin: 0 0 4px 2px; }}
-.user .speaker {{ text-align: left; margin-right: 2px; }}
-.images {{ display: grid; gap: 8px; margin-top: 8px; }}
-.images img {{ max-width: 100%; border-radius: 6px; border: 1px solid var(--line); }}
-.tools-message {{ width: fit-content; max-width: 88%; }}
-.tools-bubble {{
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: rgba(255, 255, 255, .24);
-  backdrop-filter: blur(18px);
-  -webkit-backdrop-filter: blur(18px);
-  color: var(--ink);
-  overflow: hidden;
-}}
-.tools-bubble summary {{
-  cursor: pointer;
-  padding: 9px 11px;
-  color: rgba(255, 255, 255, .9);
-  font-size: 12px;
-  list-style: none;
-}}
-.tools-bubble summary::-webkit-details-marker {{ display: none; }}
-.tools-bubble summary::before {{ content: ">"; display: inline-block; margin-right: 7px; color: #82e1b1; }}
-.tools-bubble[open] summary::before {{ transform: rotate(90deg); }}
-.tool-list {{
-  display: grid;
-  gap: 6px;
-  padding: 0 11px 10px;
-  font-family: "Cascadia Mono", "Consolas", monospace;
-  font-size: 12px;
-}}
-.tool-row {{ color: rgba(255, 255, 255, .82); overflow-wrap: anywhere; }}
-#approval {{ display: none; border-top: 1px solid var(--line); background: #fff7df; padding: 12px 14px; }}
-#approval.visible {{ display: block; }}
-#approval-title {{ font-weight: 700; margin-bottom: 5px; }}
-#approval-body {{ color: #4b4430; white-space: pre-wrap; overflow-wrap: anywhere; }}
-.approval-actions {{ display: flex; gap: 8px; margin-top: 10px; }}
-.composer {{ padding: 12px; }}
-button {{
-  background: transparent;
-  color: white;
-  border: 1px solid var(--line);
-  border-radius: 7px;
-  padding: 0 14px;
-  cursor: pointer;
-}}
-button.secondary {{ background: transparent; color: var(--ink); }}
-button.danger {{ background: var(--danger); border-color: var(--danger); }}
-.voice-button {{
-  width: fit-content;
-  min-height: 44px;
-  padding: 0 16px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  background: transparent;
-  backdrop-filter: blur(18px);
-  -webkit-backdrop-filter: blur(18px);
-  color: var(--ink);
-  font-weight: 650;
-}}
-.voice-button svg {{ width: 17px; height: 17px; stroke-width: 2; }}
-.voice-button.listening,
-.voice-button.sending,
-.voice-button.working {{ background: transparent; border-color: var(--accent); color: var(--accent); }}
-button:disabled {{ opacity: .45; cursor: default; }}
-.empty {{ display: none; }}
-</style>
-</head>
-<body>
-<div class="shell">
-  <main>
-    <div id="transcript"><div class="empty">No messages yet.</div></div>
-    <div id="bottom-panel">
-      <div id="approval">
-        <div id="approval-title">Approval required</div>
-        <div id="approval-body"></div>
-        <div class="approval-actions">
-          <button id="approve">Approve</button>
-          <button id="deny" class="danger">Deny</button>
-        </div>
-      </div>
-      <div class="composer" id="composer">
-        <button id="voice" class="voice-button secondary" type="button" title="Speak" aria-label="Speak">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true">
-            <path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3Z"></path>
-            <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
-            <path d="M12 19v3"></path>
-          </svg>
-          <span id="voice-label">Speak</span>
-        </button>
-        <div class="meta-row">
-          <div class="meta" id="meta">{html.escape(settings.model)}</div>
-        </div>
-      </div>
-    </div>
-  </main>
-</div>
-<script>
-const transcript = document.getElementById('transcript');
-const bottomPanel = document.getElementById('bottom-panel');
-const meta = document.getElementById('meta');
-const composer = document.getElementById('composer');
-const approval = document.getElementById('approval');
-const approvalBody = document.getElementById('approval-body');
-const approve = document.getElementById('approve');
-const deny = document.getElementById('deny');
-const voice = document.getElementById('voice');
-const voiceLabel = document.getElementById('voice-label');
-let busy = false;
-let pendingApproval = null;
-let voiceState = 'idle';
-let streamingBubble = null;
-let currentToolGroup = null;
-let resizeTimer = null;
 
-function api() {{ return window.pywebview.api; }}
-function setBusy(value) {{
-  busy = value;
-  voice.disabled = value || !!pendingApproval;
-  voice.classList.toggle('working', value);
-  if (value) {{
-    voiceLabel.textContent = 'Sending';
-    voice.title = 'Sending';
-    voice.setAttribute('aria-label', voice.title);
-  }} else {{
-    updateVoiceButton();
-  }}
-}}
-function clearEmpty() {{
-  const empty = transcript.querySelector('.empty');
-  if (empty) empty.remove();
-}}
-function scrollBottom() {{ transcript.scrollTop = transcript.scrollHeight; }}
-async function resizeFlyout() {{
-  const maxHeight = 700;
-  const naturalTranscriptHeight = Math.max(transcript.scrollHeight, transcript.offsetHeight);
-  const bottomHeight = bottomPanel.offsetHeight;
-  const naturalHeight = Math.ceil(naturalTranscriptHeight + bottomHeight);
-  const targetHeight = Math.max(96, Math.min(maxHeight, naturalHeight));
-  const transcriptHeight = Math.max(0, targetHeight - bottomHeight);
-  transcript.style.maxHeight = `${{transcriptHeight}}px`;
-  transcript.style.overflowY = naturalTranscriptHeight > transcriptHeight ? 'auto' : 'hidden';
-  try {{
-    if (api().resize_flyout) await api().resize_flyout(targetHeight);
-  }} catch (_) {{}}
-  scrollBottom();
-}}
-function scheduleResize() {{
-  clearTimeout(resizeTimer);
-  resizeTimer = setTimeout(resizeFlyout, 0);
-}}
-function addMessage(role, text, images = []) {{
-  clearEmpty();
-  streamingBubble = null;
-  if (role === 'user') currentToolGroup = null;
-  const row = document.createElement('section');
-  row.className = `msg ${{role}}`;
-  const speaker = document.createElement('div');
-  speaker.className = 'speaker';
-  speaker.textContent = role === 'user' ? 'You' : 'Tomo';
-  const bubble = document.createElement('div');
-  bubble.className = 'bubble';
-  bubble.textContent = text || '';
-  row.append(speaker, bubble);
-  if (images.length) {{
-    const imageWrap = document.createElement('div');
-    imageWrap.className = 'images';
-    for (const url of images) {{
-      const img = document.createElement('img');
-      img.src = url;
-      img.alt = 'Generated image';
-      imageWrap.appendChild(img);
-    }}
-    row.appendChild(imageWrap);
-  }}
-  transcript.appendChild(row);
-  scrollBottom();
-  scheduleResize();
-  return bubble;
-}}
-function addDelta(text) {{
-  if (!streamingBubble) streamingBubble = addMessage('assistant', '');
-  streamingBubble.textContent += text;
-  scrollBottom();
-  scheduleResize();
-}}
-function addTool(event) {{
-  clearEmpty();
-  if (!currentToolGroup) {{
-    const row = document.createElement('section');
-    row.className = 'msg tools-message';
-    const details = document.createElement('details');
-    details.className = 'tools-bubble';
-    const summary = document.createElement('summary');
-    const list = document.createElement('div');
-    list.className = 'tool-list';
-    details.append(summary, list);
-    row.appendChild(details);
-    transcript.appendChild(row);
-    currentToolGroup = {{ count: 0, summary, list }};
-  }}
-  currentToolGroup.count += 1;
-  currentToolGroup.summary.textContent = `tools ${{currentToolGroup.count}} tool call${{currentToolGroup.count === 1 ? '' : 's'}}`;
-  const row = document.createElement('div');
-  row.className = 'tool-row';
-  row.textContent = `${{event.name}}: "${{event.input || ''}}"`;
-  currentToolGroup.list.appendChild(row);
-  scrollBottom();
-  scheduleResize();
-}}
-function showApproval(event) {{
-  pendingApproval = event.id;
-  approvalBody.textContent = `${{event.operation}} ${{event.target}}\\n\\n${{event.reason}}`;
-  approval.classList.add('visible');
-  setBusy(busy);
-  scheduleResize();
-}}
-function hideApproval() {{
-  pendingApproval = null;
-  approval.classList.remove('visible');
-  setBusy(busy);
-  scheduleResize();
-}}
-function setVoiceState(nextState) {{
-  voiceState = nextState || 'idle';
-  updateVoiceButton();
-  setBusy(busy);
-  scheduleResize();
-}}
-function updateVoiceButton() {{
-  voice.classList.toggle('listening', voiceState === 'listening');
-  voice.classList.toggle('sending', voiceState === 'sending');
-  voiceLabel.textContent = voiceState === 'listening' ? 'Cancel' : voiceState === 'sending' ? 'Stop' : 'Speak';
-  voice.title = voiceState === 'listening' ? 'Cancel listening' : voiceState === 'sending' ? 'Stop sending' : 'Speak';
-  voice.setAttribute('aria-label', voice.title);
-}}
-async function handleEvent(event) {{
-  if (event.type === 'busy') setBusy(event.busy);
-  if (event.type === 'user_message') addMessage('user', event.text);
-  if (event.type === 'assistant_delta') addDelta(event.text);
-  if (event.type === 'assistant_message') {{
-    if (streamingBubble) {{
-      if (event.images && event.images.length) {{
-        const imageWrap = document.createElement('div');
-        imageWrap.className = 'images';
-        for (const url of event.images) {{
-          const img = document.createElement('img');
-          img.src = url;
-          img.alt = 'Generated image';
-          imageWrap.appendChild(img);
-        }}
-        streamingBubble.parentElement.appendChild(imageWrap);
-      }}
-      streamingBubble = null;
-    }} else {{
-      addMessage('assistant', event.text, event.images || []);
-    }}
-  }}
-  if (event.type === 'tool_event') addTool(event);
-  if (event.type === 'approval_request') showApproval(event);
-  if (event.type === 'approval_resolved') hideApproval();
-  if (event.type === 'error') addMessage('assistant', `Error: ${{event.message}}`);
-  if (event.type === 'voice_state') {{
-    setVoiceState(event.state);
-  }}
-  if (event.type === 'voice_final') setVoiceState('sending');
-  if (event.type === 'voice_error') {{
-    setVoiceState('idle');
-    addMessage('assistant', `Voice input error: ${{event.message}}`);
-  }}
-}}
-async function poll() {{
-  try {{
-    const events = await api().poll_events();
-    for (const event of events) await handleEvent(event);
-  }} finally {{
-    setTimeout(poll, 180);
-  }}
-}}
-new ResizeObserver(scheduleResize).observe(bottomPanel);
-new ResizeObserver(scheduleResize).observe(transcript);
-voice.addEventListener('click', async () => {{
-  if (voiceState === 'listening' || voiceState === 'sending') {{
-    await api().cancel_voice_input();
-    setVoiceState('idle');
-    return;
-  }}
-  const result = await api().toggle_voice_input();
-  if (!result.ok) addMessage('assistant', result.error || 'Unable to start voice input.');
-}});
-approve.addEventListener('click', () => pendingApproval && api().resolve_approval(pendingApproval, true));
-deny.addEventListener('click', () => pendingApproval && api().resolve_approval(pendingApproval, false));
-window.addEventListener('pywebviewready', async () => {{
-  const data = await api().bootstrap();
-  if (data.ok) {{
-    meta.textContent = `${{data.model}} - ${{data.session.name}} - ${{data.session.id.slice(0, 8)}}`;
-    for (const message of data.messages) addMessage(message.role === 'user' ? 'user' : 'assistant', message.text, message.images || []);
-    setVoiceState(data.voice_state || 'idle');
-    setBusy(data.busy);
-    scheduleResize();
-  }}
-  poll();
-}});
-</script>
-</body>
-</html>
-"""
+def load_desktop_html() -> str:
+    if _DESKTOP_DIST_INDEX.exists():
+        return inline_desktop_dist_html(_DESKTOP_DIST_INDEX)
+    return _DESKTOP_HTML_PATH.read_text(encoding="utf-8")
+
+
+def inline_desktop_dist_html(index_path: Path) -> str:
+    html = index_path.read_text(encoding="utf-8")
+    dist_dir = index_path.parent
+
+    def inline_script(match: re.Match[str]) -> str:
+        src = match.group("src")
+        script_path = (dist_dir / src).resolve()
+        if not script_path.is_file() or not script_path.is_relative_to(dist_dir.resolve()):
+            return match.group(0)
+        script = script_path.read_text(encoding="utf-8")
+        return f'<script type="module">{script}</script>'
+
+    def inline_stylesheet(match: re.Match[str]) -> str:
+        href = match.group("href")
+        stylesheet_path = (dist_dir / href).resolve()
+        if not stylesheet_path.is_file() or not stylesheet_path.is_relative_to(dist_dir.resolve()):
+            return match.group(0)
+        stylesheet = stylesheet_path.read_text(encoding="utf-8")
+        return f"<style>{stylesheet}</style>"
+
+    html = re.sub(
+        r'<script\b(?=[^>]*\bsrc="(?P<src>\./assets/[^"]+\.js)")(?=[^>]*\btype="module")[^>]*></script>',
+        inline_script,
+        html,
+    )
+    html = re.sub(
+        r'<link\b(?=[^>]*\bhref="(?P<href>\./assets/[^"]+\.css)")(?=[^>]*\brel="stylesheet")[^>]*>',
+        inline_stylesheet,
+        html,
+    )
+    return html
+
+
+DESKTOP_HTML: str = load_desktop_html()
+

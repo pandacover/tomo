@@ -75,6 +75,7 @@ class WindowsSpeechInput:
     def _run_recognition(self, generation: int) -> None:
         loop = asyncio.new_event_loop()
         recognizer: object | None = None
+        delivered_final = False
         try:
             asyncio.set_event_loop(loop)
             recognizer = self.recognizer_factory()
@@ -87,6 +88,7 @@ class WindowsSpeechInput:
             text = loop.run_until_complete(recognize_continuous(recognizer, self._is_current, generation))
             if text and self._is_current(generation):
                 self.on_final(text)
+                delivered_final = True
         except Exception as exc:  # noqa: BLE001
             if self._is_current(generation):
                 self.on_error(format_speech_error(exc))
@@ -98,7 +100,8 @@ class WindowsSpeechInput:
                     self._recognizer = None
                     self._loop = None
                     self._listening = False
-                    self.on_state("idle")
+                    if not delivered_final:
+                        self.on_state("idle")
 
     def _stop_current_recognition(self) -> None:
         with self._lock:

@@ -22,6 +22,14 @@ def test_system_prompt_documents_telegram_lifecycle_commands():
     assert "`.tomo/telegram.log`" in SYSTEM_PROMPT
 
 
+def test_system_prompt_documents_desktop_lifecycle_commands():
+    assert "`uv run tomo desktop start`" in SYSTEM_PROMPT
+    assert "`uv run tomo desktop stop`" in SYSTEM_PROMPT
+    assert "`uv run tomo desktop restart`" in SYSTEM_PROMPT
+    assert "`.tomo/desktop.pid`" in SYSTEM_PROMPT
+    assert "`.tomo/desktop.log`" in SYSTEM_PROMPT
+
+
 def test_skill_sources_match_cli_precedence():
     assert SKILL_SOURCES == [
         str(Path.home() / ".agents" / "skills"),

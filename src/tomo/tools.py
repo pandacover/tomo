@@ -19,6 +19,7 @@ from langchain_core.tools import tool
 from rank_bm25 import BM25Okapi
 
 from .browser_tools import browser
+from .scheduler import get_scheduler
 
 
 MAX_TERMINAL_OUTPUT = 20_000
@@ -54,7 +55,7 @@ def set_approval_handler(handler: ApprovalHandler | None) -> None:
 
 
 def get_tools():
-    return [files_search, terminal, browser, web_search, web_fetch, generate_image, append_memory, read_memory, schedule_task]
+    return [files_search, terminal, browser, web_search, web_fetch, generate_image, append_memory, read_memory, schedule_reminder, schedule_action, list_scheduled_tasks, cancel_scheduled_task]
 
 
 @tool("generate_image")
@@ -140,24 +141,51 @@ Use for tests, project CLIs, git/status checks, package commands, file metadata,
     return f"{prefix}\n{output}" if output else prefix
 
 
-@tool("schedule_task")
-def schedule_task(command: str, delay: str = "5 minutes") -> str:
-    """Schedule a non-interactive bash command to run later using the local 'at' scheduler. delay examples: '5 minutes', '1 hour', 'now + 30 min'."""
+@tool("schedule_reminder")
+def schedule_reminder(text: str, when: str = "in 5 minutes") -> str:
+    """Schedule a reminder message for later. when examples: 'in 10 minutes', 'in 2 hours', 'now + 30 min'."""
     try:
-        result = subprocess.run(
-            ["at", delay],
-            input=command + "\n",
-            cwd=_workspace(),
-            text=True,
-            capture_output=True,
-            timeout=30,
-        )
-        out = (result.stdout or "") + (result.stderr or "")
-        return f"Scheduled (exit {result.returncode}): {out.strip()}" if out.strip() else f"Scheduled (exit {result.returncode})"
-    except FileNotFoundError:
-        return "Error: 'at' command not found on this system."
+        task_id = get_scheduler().schedule_reminder(text, when)
+        return f"Reminder scheduled (id: {task_id})."
     except Exception as exc:  # noqa: BLE001
-        return f"Error scheduling task: {exc}"
+        return f"Error scheduling reminder: {exc}"
+
+
+@tool("schedule_action")
+def schedule_action(action: str, when: str = "in 5 minutes", payload: str | None = None) -> str:
+    """Schedule a future action (tool call or terminal). payload is JSON string if needed."""
+    try:
+        import json as _json
+        p = _json.loads(payload) if payload else {}
+        task_id = get_scheduler().schedule_action(action, p, when)
+        return f"Action scheduled (id: {task_id})."
+    except Exception as exc:  # noqa: BLE001
+        return f"Error scheduling action: {exc}"
+
+
+@tool("list_scheduled_tasks")
+def list_scheduled_tasks(include_past: bool = False) -> str:
+    """List pending (and optionally past) scheduled tasks."""
+    try:
+        tasks = get_scheduler().list_tasks(include_past=include_past)
+        if not tasks:
+            return "No scheduled tasks."
+        lines = []
+        for t in tasks:
+            lines.append(f"{t.id[:8]} | {t.kind} | {t.scheduled_at} | {t.status} | {t.payload}")
+        return "\n".join(lines)
+    except Exception as exc:  # noqa: BLE001
+        return f"Error listing tasks: {exc}"
+
+
+@tool("cancel_scheduled_task")
+def cancel_scheduled_task(task_id: str) -> str:
+    """Cancel a pending scheduled task by id (use list_scheduled_tasks first)."""
+    try:
+        ok = get_scheduler().cancel(task_id)
+        return "Cancelled." if ok else "Task not found or already fired/cancelled."
+    except Exception as exc:  # noqa: BLE001
+        return f"Error cancelling task: {exc}"
 
 
 @tool("files_search")

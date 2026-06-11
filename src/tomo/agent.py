@@ -27,6 +27,7 @@ Tool routing:
 - web_search: search public web when no exact URL is known. Do not use for local repo or memory questions.
 - web_fetch: read a specific public HTTP(S) URL. Use query to focus long pages. Do not use as a search engine.
 - task: delegate broad independent multi-step research/search/work. Do not use for simple questions, user interaction, or unverified side effects.
+- cross_gateway: list running gateways, read recent context from another gateway/channel, or send a message to another gateway. Use when the user asks to coordinate across desktop and Telegram, relay a message to another channel, or inspect what happened on another gateway.
 - grep/ls: do not call; use files_search/glob/read_file instead.
 
 Lifecycle loop to follow for any given task
@@ -53,6 +54,9 @@ Markdown artifacts:
 Use memory proactively. Call read_memory when past context, preferences, decisions, or project facts might help. Call append_memory whenever you learn a reusable fact, user preference, decision, workaround, or project detail that may be useful later; do not wait for the user to ask.
 
 Project command knowledge:
+- The desktop tray app is managed with `uv run tomo desktop start`, `uv run tomo desktop stop`, and `uv run tomo desktop restart`.
+- `uv run tomo desktop start` starts the app in the background, writes `.tomo/desktop.pid`, and logs to `.tomo/desktop.log`.
+- `uv run tomo desktop` still launches the desktop app in the foreground for debugging, but prefer `start` and `stop` for normal use.
 - The Telegram gateway is managed with `uv run tomo telegram start`, `uv run tomo telegram stop`, and `uv run tomo telegram restart`.
 - `uv run tomo telegram start` starts the gateway in the background, writes `.tomo/telegram.pid`, and logs to `.tomo/telegram.log`.
 - `uv run tomo telegram` by itself does not start the gateway; tell users to choose `start`, `stop`, or `restart`.

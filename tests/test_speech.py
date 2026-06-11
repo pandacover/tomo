@@ -75,9 +75,25 @@ def test_windows_speech_input_emits_final_text():
 
     assert finals == ["open notes"]
     assert errors == []
-    assert states[0] == "listening"
-    assert states[-1] == "idle"
+    assert states == ["listening"]
     assert recognizer.closed is True
+
+
+def test_windows_speech_input_returns_idle_when_no_final_text():
+    recognizer = FakeRecognizer("")
+    states: list[str] = []
+    speech = WindowsSpeechInput(
+        on_state=states.append,
+        on_partial=lambda text: None,
+        on_final=lambda text: None,
+        on_error=lambda error: None,
+        recognizer_factory=lambda: recognizer,
+    )
+
+    assert speech.start() is True
+    wait_until(lambda: states[-1] == "idle" if states else False)
+
+    assert states == ["listening", "idle"]
 
 
 def test_windows_speech_input_retries_timeout_until_final_text():
