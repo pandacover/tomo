@@ -34,13 +34,19 @@ export const createMockBridge = (): DesktopBridge => {
       ],
     }),
     pollEvents: async () => events.splice(0, events.length),
-    sendMessage: async (text) => {
+    setPendingMessageImages: async () => ok(),
+    sendMessage: async (text, images) => {
       const trimmed = text.trim()
-      if (!trimmed) {
+      const imageUrls = (images || []).filter((url) => url.trim().length > 0)
+      if (!trimmed && imageUrls.length === 0) {
         return { ok: false, error: "Message cannot be empty." }
       }
 
-      enqueue({ type: "busy", busy: true }, { type: "user_message", text: trimmed })
+      const displayText = trimmed || (imageUrls.length > 0 ? "attached images" : "")
+      enqueue(
+        { type: "busy", busy: true },
+        { type: "user_message", text: displayText, images: imageUrls },
+      )
 
       window.setTimeout(() => {
         enqueue({ type: "tool_event", name: "mock_search", input: `{"query":"${trimmed}"}` })

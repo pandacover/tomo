@@ -14,10 +14,13 @@ from tomo.desktop import (
     DesktopApprovalResponder,
     EventEmitter,
     Rect,
+    build_user_content,
+    message_to_dto,
     run_desktop,
     validate_wsl_qt_backend,
 )
 from tomo.gateway import AgentTrace, GatewayReply, ToolCallLifecycleEvent
+
 from tomo.session_store import create_session
 from tomo.tools import ApprovalRequest
 
@@ -25,19 +28,33 @@ from tomo.tools import ApprovalRequest
 class FakeTomo:
     def __init__(self) -> None:
         self.session = create_session("Desktop")
-        self.messages: list[tuple[str, str]] = []
+        self.messages: list[tuple[str, object]] = []
 
     def get_session(self, channel_id: str):
         return self.session
 
     def send_text_with_events(self, channel_id: str, text: str, on_event=None, on_text_delta=None) -> GatewayReply:
-        self.messages.append((channel_id, text))
+        return self.send_user_content_with_events(channel_id, text, on_event=on_event, on_text_delta=on_text_delta)
+
+    def send_user_content_with_events(
+        self,
+        channel_id: str,
+        content: object,
+        on_event=None,
+        on_text_delta=None,
+    ) -> GatewayReply:
+        self.messages.append((channel_id, content))
+        query = content if isinstance(content, str) else "image"
         if on_event is not None:
-            on_event(ToolCallLifecycleEvent(name="web_search", input={"query": text}))
+            on_event(ToolCallLifecycleEvent(name="web_search", input={"query": query}))
         if on_text_delta is not None:
             on_text_delta("streamed ")
             on_text_delta("reply")
-        return GatewayReply(text="streamed reply", trace=AgentTrace(), images=("https://example.com/image.png",))
+        return GatewayReply(
+            text="streamed reply",
+            trace=AgentTrace(reasoning_summary="Checked sources\nDrafted answer"),
+            images=("https://example.com/image.png",),
+        )
 
 
 class SlowTomo(FakeTomo):
@@ -46,7 +63,13 @@ class SlowTomo(FakeTomo):
         self.started = threading.Event()
         self.release = threading.Event()
 
-    def send_text_with_events(self, channel_id: str, text: str, on_event=None, on_text_delta=None) -> GatewayReply:
+    def send_user_content_with_events(
+        self,
+        channel_id: str,
+        content: object,
+        on_event=None,
+        on_text_delta=None,
+    ) -> GatewayReply:
         self.started.set()
         self.release.wait(timeout=1)
         return GatewayReply(text="done", trace=AgentTrace())
@@ -153,6 +176,7 @@ def test_desktop_api_exposes_only_narrow_bridge_methods():
         "resize_flyout",
         "resolve_approval",
         "send_message",
+        "set_pending_message_images",
         "show_window",
         "start_voice_input",
         "stop_voice_input",
@@ -167,6 +191,7 @@ def test_desktop_bridge_send_message_rejects_empty_text():
     bridge = DesktopBridge(tomo=FakeTomo())
 
     assert bridge.send_message("   ") == {"ok": False, "error": "Message cannot be empty."}
+    assert bridge.send_message("", []) == {"ok": False, "error": "Message cannot be empty."}
 
 
 def test_desktop_bridge_send_message_rejects_when_busy():
@@ -238,6 +263,74 @@ def test_desktop_bridge_resize_flyout_uses_minimum_height(monkeypatch):
     assert window.position == (510, 402)
 
 
+def test_desktop_bridge_resize_flyout_skips_unchanged_geometry(monkeypatch):
+    bridge = DesktopBridge(tomo=FakeTomo())
+    window = FakeWindow()
+    bridge.set_window(window)
+    monkeypatch.setattr("tomo.desktop.get_windows_work_area", lambda: Rect(0, 0, 1440, 900))
+
+    assert bridge.resize_flyout(500) == {"ok": True, "height": 500}
+    first_size = window.size
+    first_position = window.position
+
+    assert bridge.resize_flyout(500) == {"ok": True, "height": 500}
+
+    assert window.size == first_size
+    assert window.position == first_position
+
+
+def test_desktop_bridge_voice_final_auto_sends_pending_images(monkeypatch):
+    monkeypatch.setattr(desktop, "VOICE_AUTO_SEND_DELAY_SECONDS", 0.01)
+    tomo = FakeTomo()
+    bridge = DesktopBridge(tomo=tomo)
+    image_url = "data:image/jpeg;base64,abc"
+    bridge.set_pending_message_images([image_url])
+
+    bridge._handle_voice_final("describe this")
+    deadline = time.monotonic() + 1
+    while not tomo.messages and time.monotonic() < deadline:
+        time.sleep(0.01)
+    wait_for_idle(bridge)
+
+    assert tomo.messages == [
+        (
+            "desktop:local",
+            [
+                {"type": "text", "text": "describe this"},
+                {"type": "image_url", "image_url": {"url": image_url}},
+            ],
+        )
+    ]
+    assert bridge._pending_message_images == []
+    assert {
+        "type": "user_message",
+        "text": "describe this",
+        "images": [image_url],
+    } in bridge.poll_events()
+
+
+def test_desktop_bridge_voice_final_auto_sends_image_only_when_pending_images(monkeypatch):
+    monkeypatch.setattr(desktop, "VOICE_AUTO_SEND_DELAY_SECONDS", 0.01)
+    tomo = FakeTomo()
+    bridge = DesktopBridge(tomo=tomo)
+    image_url = "data:image/png;base64,xyz"
+    bridge.set_pending_message_images([image_url])
+
+    bridge._handle_voice_final("   ")
+    deadline = time.monotonic() + 1
+    while not tomo.messages and time.monotonic() < deadline:
+        time.sleep(0.01)
+    wait_for_idle(bridge)
+
+    assert tomo.messages == [
+        (
+            "desktop:local",
+            [{"type": "image_url", "image_url": {"url": image_url}}],
+        )
+    ]
+    assert {"type": "user_message", "text": "attached images", "images": [image_url]} in bridge.poll_events()
+
+
 def test_desktop_bridge_voice_final_auto_sends_to_agent(monkeypatch):
     monkeypatch.setattr(desktop, "VOICE_AUTO_SEND_DELAY_SECONDS", 0.01)
     tomo = FakeTomo()
@@ -255,7 +348,19 @@ def test_desktop_bridge_voice_final_auto_sends_to_agent(monkeypatch):
     events = bridge.poll_events()
     assert {"type": "voice_state", "state": "sending"} in events
     assert {"type": "voice_final", "text": "send this", "send_delay": 0.01} in events
-    assert {"type": "user_message", "text": "send this"} in events
+    assert {"type": "user_message", "text": "send this", "images": []} in events
+
+
+def test_desktop_bridge_voice_final_keeps_sending_until_auto_send(monkeypatch):
+    monkeypatch.setattr(desktop, "VOICE_AUTO_SEND_DELAY_SECONDS", 0.05)
+    bridge = DesktopBridge(tomo=FakeTomo(), speech_input=FakeSpeechInput())
+
+    bridge._handle_voice_final("hold send")
+    time.sleep(0.02)
+
+    assert bridge.voice_state == "sending"
+    time.sleep(0.08)
+    assert bridge.voice_state == "idle"
 
 
 def test_desktop_bridge_cancel_voice_input_prevents_pending_auto_send(monkeypatch):
@@ -270,6 +375,101 @@ def test_desktop_bridge_cancel_voice_input_prevents_pending_auto_send(monkeypatc
     assert tomo.messages == []
 
 
+def test_build_user_content_preserves_text_and_images():
+    assert build_user_content("hello", []) == "hello"
+    assert build_user_content(
+        "what is this?",
+        ["data:image/jpeg;base64,abc"],
+    ) == [
+        {"type": "text", "text": "what is this?"},
+        {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,abc"}},
+    ]
+    assert build_user_content("", ["data:image/png;base64,xyz"]) == [
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,xyz"}},
+    ]
+
+
+def test_message_to_dto_extracts_user_images_from_structured_content():
+    message = {
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "look"},
+            {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,abc"}},
+        ],
+    }
+
+    assert message_to_dto(message) == {
+        "role": "user",
+        "text": "look",
+        "images": ["data:image/jpeg;base64,abc"],
+    }
+
+
+def test_desktop_bridge_bootstrap_returns_user_images_from_structured_messages():
+    tomo = FakeTomo()
+    tomo.session.messages.append(
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "look"},
+                {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,abc"}},
+            ],
+        }
+    )
+    bridge = DesktopBridge(tomo=tomo)
+
+    data = bridge.bootstrap()
+
+    assert data["messages"] == [
+        {
+            "role": "user",
+            "text": "look",
+            "images": ["data:image/jpeg;base64,abc"],
+        }
+    ]
+
+
+def test_desktop_bridge_send_message_accepts_image_only_payload():
+    tomo = FakeTomo()
+    bridge = DesktopBridge(tomo=tomo)
+    image_url = "data:image/jpeg;base64,abc"
+
+    assert bridge.send_message("", [image_url]) == {"ok": True}
+    wait_for_idle(bridge)
+
+    assert tomo.messages == [
+        (
+            "desktop:local",
+            [{"type": "image_url", "image_url": {"url": image_url}}],
+        )
+    ]
+    assert {"type": "user_message", "text": "attached images", "images": [image_url]} in bridge.poll_events()
+
+
+def test_desktop_bridge_send_message_accepts_text_and_images():
+    tomo = FakeTomo()
+    bridge = DesktopBridge(tomo=tomo)
+    image_url = "data:image/png;base64,xyz"
+
+    assert bridge.send_message("what is this?", [image_url]) == {"ok": True}
+    wait_for_idle(bridge)
+
+    assert tomo.messages == [
+        (
+            "desktop:local",
+            [
+                {"type": "text", "text": "what is this?"},
+                {"type": "image_url", "image_url": {"url": image_url}},
+            ],
+        )
+    ]
+    assert {
+        "type": "user_message",
+        "text": "what is this?",
+        "images": [image_url],
+    } in bridge.poll_events()
+
+
 def test_desktop_bridge_successful_worker_queues_events():
     bridge = DesktopBridge(tomo=FakeTomo())
 
@@ -278,7 +478,7 @@ def test_desktop_bridge_successful_worker_queues_events():
 
     events = bridge.poll_events()
     assert events[0] == {"type": "busy", "busy": True}
-    assert events[1] == {"type": "user_message", "text": "hello"}
+    assert events[1] == {"type": "user_message", "text": "hello", "images": []}
     assert {"type": "assistant_delta", "text": "streamed "} in events
     assert {"type": "assistant_delta", "text": "reply"} in events
     assert {
@@ -289,6 +489,19 @@ def test_desktop_bridge_successful_worker_queues_events():
     assert events[-1] == {"type": "busy", "busy": False}
 
 
+def test_desktop_bridge_emits_reasoning_event_when_trace_enabled(monkeypatch):
+    monkeypatch.setattr(desktop, "effective_show_reasoning_trace", lambda **_: True)
+    bridge = DesktopBridge(tomo=FakeTomo())
+
+    assert bridge.send_message("hello") == {"ok": True}
+    wait_for_idle(bridge)
+
+    assert {
+        "type": "reasoning_event",
+        "text": "Checked sources\nDrafted answer",
+    } in bridge.poll_events()
+
+
 def test_desktop_bridge_tool_callback_queues_tool_event():
     bridge = DesktopBridge(tomo=FakeTomo())
 
@@ -296,6 +509,35 @@ def test_desktop_bridge_tool_callback_queues_tool_event():
     wait_for_idle(bridge)
 
     assert {"type": "tool_event", "name": "web_search", "input": '{"query":"hello"}'} in bridge.poll_events()
+
+
+def test_desktop_bridge_delivers_cross_gateway_message_to_ui_and_session(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    tomo = FakeTomo()
+    bridge = DesktopBridge(tomo=tomo)
+
+    bridge.deliver_cross_gateway_message(
+        bridge.channel_id,
+        "ping from telegram",
+        source_gateway="telegram",
+    )
+
+    assert {
+        "type": "cross_gateway_message",
+        "channel_id": bridge.channel_id,
+        "source": "telegram",
+        "text": "ping from telegram",
+    } in bridge.poll_events()
+    assert tomo.session.messages[-1] == {
+        "role": "assistant",
+        "content": "[from telegram] ping from telegram",
+    }
+    bootstrap = bridge.bootstrap()
+    assert bootstrap["messages"][-1] == {
+        "role": "assistant",
+        "text": "[from telegram] ping from telegram",
+        "images": [],
+    }
 
 
 def test_desktop_approval_responder_resolves_approve():

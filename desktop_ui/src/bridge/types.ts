@@ -37,12 +37,14 @@ export interface ApprovalRequest {
 
 export type DesktopEvent =
   | { type: "busy"; busy: boolean }
-  | { type: "user_message"; text: string }
+  | { type: "user_message"; text: string; images?: string[] }
   | { type: "assistant_delta"; text: string }
   | { type: "assistant_message"; text: string; images?: string[] }
   | { type: "tool_event"; name: string; input: string }
+  | { type: "reasoning_event"; text: string }
   | ({ type: "approval_request" } & ApprovalRequest)
   | { type: "approval_resolved"; id: string; approved: boolean }
+  | { type: "cross_gateway_message"; source: string; text: string; channel_id: string }
   | { type: "error"; message: string }
   | { type: "voice_state"; state: VoiceState }
   | { type: "voice_partial"; text: string }
@@ -52,7 +54,8 @@ export type DesktopEvent =
 export interface DesktopBridgeApi {
   bootstrap(): Promise<BootstrapResponse>
   poll_events(): Promise<DesktopEvent[]>
-  send_message(text: string): Promise<ActionResponse>
+  send_message(text: string, images?: string[]): Promise<ActionResponse>
+  set_pending_message_images(images?: string[]): Promise<ActionResponse>
   resolve_approval(id: string, approved: boolean): Promise<ActionResponse>
   start_voice_input(): Promise<ActionResponse>
   toggle_voice_input(): Promise<ActionResponse>
@@ -69,7 +72,8 @@ export interface DesktopBridge {
   kind: "pywebview" | "mock"
   bootstrap(): Promise<BootstrapResponse>
   pollEvents(): Promise<DesktopEvent[]>
-  sendMessage(text: string): Promise<ActionResponse>
+  sendMessage(text: string, images?: string[]): Promise<ActionResponse>
+  setPendingMessageImages(images?: string[]): Promise<ActionResponse>
   resolveApproval(id: string, approved: boolean): Promise<ActionResponse>
   startVoiceInput(): Promise<ActionResponse>
   toggleVoiceInput(): Promise<ActionResponse>
@@ -88,5 +92,6 @@ declare global {
       api?: DesktopBridgeApi
     }
     scheduleResize?: () => void
+    __tomoDispatchEvent?: (event: DesktopEvent) => void
   }
 }

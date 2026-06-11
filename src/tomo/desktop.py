@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import json
 import os
 import queue
 import logging
@@ -17,8 +18,11 @@ from typing import Any, NamedTuple
 from uuid import uuid4
 
 from .config import settings
-from .gateway import TomoGateway, format_tool_input
+from .cross_gateway_bridge import get_cross_gateway_bridge
+from .gateway import TomoGateway, UserContent, format_tool_input
+from .reasoning import effective_show_reasoning_trace
 from .speech import WindowsSpeechInput
+from .session_store import save_session
 from .tools import ApprovalRequest
 
 DESKTOP_CHANNEL_ID = "desktop:local"
@@ -125,8 +129,56 @@ class DesktopBridge:
         )
         self._voice_send_timer: threading.Timer | None = None
         self._pending_voice_text = ""
+        self._pending_message_images: list[str] = []
         self._flyout_height = FLYOUT_INITIAL_HEIGHT
+        self._flyout_geometry: dict[str, int] = {}
         self._lock = threading.Lock()
+        get_cross_gateway_bridge().attach(
+            "desktop",
+            self,
+            default_channel_id=self.channel_id,
+            channels=[self.channel_id],
+        )
+
+    def deliver_cross_gateway_message(self, channel_id: str, text: str, *, source_gateway: str) -> None:
+        display_text = f"[from {source_gateway}] {text}"
+        session = self.tomo.get_session(channel_id)
+        session.messages.append({"role": "assistant", "content": display_text})
+        save_session(session)
+        event: DesktopEvent = {
+            "type": "cross_gateway_message",
+            "channel_id": channel_id,
+            "source": source_gateway,
+            "text": text,
+        }
+        LOGGER.info(
+            "bridge.cross_gateway_message source=%s channel=%s chars=%s",
+            source_gateway,
+            channel_id,
+            len(text),
+        )
+        self.emitter(event)
+        self._push_event_to_ui(event)
+        self.show_window()
+
+    def _push_event_to_ui(self, event: DesktopEvent) -> None:
+        if self.window is None:
+            return
+        payload = json.dumps(event, ensure_ascii=True)
+        evaluate_js(
+            self.window,
+            f"window.__tomoDispatchEvent && window.__tomoDispatchEvent({payload})",
+        )
+
+    def get_cross_gateway_context(self, channel_id: str) -> dict[str, object]:
+        session = self.tomo.get_session(channel_id)
+        return {
+            "session": asdict(session.metadata),
+            "messages": session.messages,
+        }
+
+    def list_cross_gateway_channels(self) -> list[str]:
+        return [self.channel_id]
 
     def set_window(self, window: object) -> None:
         LOGGER.info("bridge.set_window window=%s", type(window).__name__)
@@ -151,27 +203,45 @@ class DesktopBridge:
             LOGGER.info("bridge.poll_events count=%s types=%s", len(events), [event.get("type") for event in events])
         return events
 
-    def send_message(self, text: str) -> dict[str, object]:
+    def set_pending_message_images(self, images: list[str] | None) -> dict[str, object]:
+        self._pending_message_images = normalize_message_images(images)
+        LOGGER.info("bridge.set_pending_message_images count=%s", len(self._pending_message_images))
+        return {"ok": True}
+
+    def send_message(self, text: str, images: list[str] | None = None) -> dict[str, object]:
         text = text.strip()
-        if not text:
+        normalized_images = normalize_message_images(images)
+        if not text and not normalized_images:
             return {"ok": False, "error": "Message cannot be empty."}
         with self._lock:
             if self.busy:
                 return {"ok": False, "error": "Tomo is still working."}
             self.busy = True
-        LOGGER.info("bridge.send_message accepted chars=%s", len(text))
+        display_text = text or ("attached images" if normalized_images else "")
+        content = build_user_content(text, normalized_images)
+        LOGGER.info(
+            "bridge.send_message accepted chars=%s images=%s",
+            len(text),
+            len(normalized_images),
+        )
         self.emitter({"type": "busy", "busy": True})
-        self.emitter({"type": "user_message", "text": text})
-        thread = threading.Thread(target=self._send_worker, args=(text,), daemon=True)
+        self.emitter(
+            {
+                "type": "user_message",
+                "text": display_text,
+                "images": normalized_images,
+            }
+        )
+        thread = threading.Thread(target=self._send_worker, args=(content,), daemon=True)
         thread.start()
         return {"ok": True}
 
-    def _send_worker(self, text: str) -> None:
+    def _send_worker(self, content: UserContent) -> None:
         try:
-            LOGGER.info("bridge.worker.start chars=%s", len(text))
-            reply = self.tomo.send_text_with_events(
+            LOGGER.info("bridge.worker.start multimodal=%s", isinstance(content, list))
+            reply = self.tomo.send_user_content_with_events(
                 self.channel_id,
-                text,
+                content,
                 on_event=lambda event: self.emitter(
                     {
                         "type": "tool_event",
@@ -188,6 +258,18 @@ class DesktopBridge:
             self.emitter({"type": "error", "message": str(exc)})
         else:
             LOGGER.info("bridge.worker.reply text_chars=%s images=%s", len(reply.text), len(reply.images))
+            trace_overrides = getattr(self.tomo, "channel_trace_override", {})
+            if effective_show_reasoning_trace(
+                chat_override=trace_overrides.get(self.channel_id)
+                if isinstance(trace_overrides, dict)
+                else None
+            ) and reply.trace.reasoning_summary:
+                self.emitter(
+                    {
+                        "type": "reasoning_event",
+                        "text": reply.trace.reasoning_summary,
+                    }
+                )
             self.emitter(
                 {
                     "type": "assistant_message",
@@ -245,7 +327,11 @@ class DesktopBridge:
         except (TypeError, ValueError):
             LOGGER.warning("bridge.resize_flyout rejected invalid_height=%r", height)
             return {"ok": False, "error": "Invalid flyout height."}
-        actual_height = position_flyout_window(self.window, requested_height)
+        actual_height = position_flyout_window(
+            self.window,
+            requested_height,
+            geometry=self._flyout_geometry,
+        )
         self._flyout_height = actual_height
         LOGGER.info("bridge.resize_flyout requested=%s actual=%s", requested_height, actual_height)
         return {"ok": True, "height": actual_height}
@@ -253,7 +339,11 @@ class DesktopBridge:
     def show_window(self) -> dict[str, object]:
         LOGGER.info("bridge.show_window window_available=%s height=%s", self.window is not None, self._flyout_height)
         if self.window is not None:
-            position_flyout_window(self.window, self._flyout_height)
+            position_flyout_window(
+                self.window,
+                self._flyout_height,
+                geometry=self._flyout_geometry,
+            )
             call_window(self.window, "show")
             call_window(self.window, "restore")
             call_window(self.window, "focus")
@@ -288,7 +378,7 @@ class DesktopBridge:
 
     def _handle_voice_final(self, text: str) -> None:
         text = text.strip()
-        if not text:
+        if not text and not self._pending_message_images:
             self._handle_voice_state("idle")
             return
         self._cancel_pending_voice_send()
@@ -317,12 +407,14 @@ class DesktopBridge:
     def _send_pending_voice_text(self) -> None:
         with self._lock:
             text = self._pending_voice_text
+            images = list(self._pending_message_images)
             self._pending_voice_text = ""
+            self._pending_message_images = []
             self._voice_send_timer = None
-        if not text:
+        if not text and not images:
             return
         self._handle_voice_state("idle")
-        result = self.send_message(text)
+        result = self.send_message(text, images or None)
         if not result.get("ok"):
             self.emitter(
                 {
@@ -359,8 +451,11 @@ class DesktopApi:
     def poll_events(self) -> list[DesktopEvent]:
         return self._bridge.poll_events()
 
-    def send_message(self, text: str) -> dict[str, object]:
-        return self._bridge.send_message(text)
+    def send_message(self, text: str, images: list[str] | None = None) -> dict[str, object]:
+        return self._bridge.send_message(text, images)
+
+    def set_pending_message_images(self, images: list[str] | None) -> dict[str, object]:
+        return self._bridge.set_pending_message_images(images)
 
     def resolve_approval(self, approval_id: str, approved: bool) -> dict[str, object]:
         return self._bridge.resolve_approval(approval_id, approved)
@@ -534,7 +629,11 @@ class DesktopApp:
             LOGGER.warning("app.position_flyout skipped window_unavailable")
             return
         LOGGER.info("app.position_flyout height=%s", self.bridge._flyout_height)
-        position_flyout_window(self.bridge.window, self.bridge._flyout_height)
+        position_flyout_window(
+            self.bridge.window,
+            self.bridge._flyout_height,
+            geometry=self.bridge._flyout_geometry,
+        )
 
     def _quit_from_tray(self, *_: object) -> None:
         LOGGER.info("app.tray.quit_clicked")
@@ -622,6 +721,30 @@ class GlobalVoiceHotkey:
                     self.callback()
         finally:
             user32.UnregisterHotKey(None, VOICE_HOTKEY_ID)
+
+
+def normalize_message_images(images: list[str] | None) -> list[str]:
+    if not images:
+        return []
+    normalized: list[str] = []
+    for image in images:
+        if not isinstance(image, str):
+            continue
+        url = image.strip()
+        if url:
+            normalized.append(url)
+    return normalized
+
+
+def build_user_content(text: str, images: list[str]) -> UserContent:
+    if not images:
+        return text
+    parts: list[dict[str, Any]] = []
+    if text:
+        parts.append({"type": "text", "text": text})
+    for url in images:
+        parts.append({"type": "image_url", "image_url": {"url": url}})
+    return parts
 
 
 def message_to_dto(message: dict[str, Any]) -> dict[str, Any]:
@@ -713,7 +836,12 @@ def clamp_flyout_height(height: int, work_area: Rect) -> int:
     return min(FLYOUT_MAX_HEIGHT, available_height, max(FLYOUT_MIN_HEIGHT, height))
 
 
-def position_flyout_window(window: object, requested_height: int) -> int:
+def position_flyout_window(
+    window: object,
+    requested_height: int,
+    *,
+    geometry: dict[str, int] | None = None,
+) -> int:
     work_area = get_windows_work_area()
     width = min(
         FLYOUT_WIDTH,
@@ -724,6 +852,22 @@ def position_flyout_window(window: object, requested_height: int) -> int:
     work_height = work_area.bottom - work_area.top
     x = work_area.left + (work_width - width) // 2
     y = work_area.top + (work_height - height) // 2
+    if geometry is not None:
+        unchanged = (
+            geometry.get("width") == width
+            and geometry.get("height") == height
+            and geometry.get("x") == x
+            and geometry.get("y") == y
+        )
+        if unchanged:
+            LOGGER.debug(
+                "window.position skipped unchanged width=%s height=%s x=%s y=%s",
+                width,
+                height,
+                x,
+                y,
+            )
+            return height
     LOGGER.info(
         "window.position requested_height=%s actual_width=%s actual_height=%s x=%s y=%s work_area=%s",
         requested_height,
@@ -735,6 +879,8 @@ def position_flyout_window(window: object, requested_height: int) -> int:
     )
     resize_window(window, width, height)
     move_window(window, x, y)
+    if geometry is not None:
+        geometry.update(width=width, height=height, x=x, y=y)
     return height
 
 

@@ -366,7 +366,6 @@ const attachInput = document.getElementById('composer-attach-input');
 // Composer state
 let composerAttachments = [];
 let composerActiveRef = null;
-let suppressNextUserMessage = false;
 
 function api() { return window.pywebview.api; }
 function setBusy(value) {
@@ -412,20 +411,24 @@ function addMessage(role, text, images = []) {
   const speaker = document.createElement('div');
   speaker.className = 'speaker';
   speaker.textContent = role === 'user' ? 'You' : 'Tomo';
-  const bubble = document.createElement('div');
-  bubble.className = 'bubble';
-  bubble.textContent = text || '';
-  row.append(speaker, bubble);
+  row.append(speaker);
   if (images.length) {
     const imageWrap = document.createElement('div');
     imageWrap.className = 'images';
     for (const url of images) {
       const img = document.createElement('img');
       img.src = url;
-      img.alt = 'Generated image';
+      img.alt = role === 'user' ? 'Attached image' : 'Generated image';
       imageWrap.appendChild(img);
     }
     row.appendChild(imageWrap);
+  }
+  let bubble = null;
+  if (text || role === 'assistant') {
+    bubble = document.createElement('div');
+    bubble.className = 'bubble';
+    bubble.textContent = text || '';
+    row.appendChild(bubble);
   }
   transcript.appendChild(row);
   scrollBottom();
@@ -503,6 +506,13 @@ function updateVoiceButton() {
   composerMic.setAttribute('aria-label', composerMic.title);
 }
 
+function syncPendingMessageImages() {
+  if (!api() || !api().set_pending_message_images) {
+    return;
+  }
+  api().set_pending_message_images(composerAttachments.map((att) => att.url));
+}
+
 // === New rich composer logic (adapted from polished prototype) ===
 function renderComposerPreviews() {
   const container = document.getElementById('composer-previews');
@@ -528,6 +538,7 @@ function renderComposerPreviews() {
     };
     thumbs.appendChild(div);
   });
+  syncPendingMessageImages();
 }
 
 function renderComposerRef() {
@@ -597,24 +608,16 @@ function doComposerSend() {
   if (!text && composerAttachments.length === 0) return;
 
   const imgs = composerAttachments.map(a => a.url);
-  if (imgs.length > 0) {
-    suppressNextUserMessage = true;
-    addMessage('user', text || ' ', imgs);
-  }
-
   let sendText = text;
   if (composerActiveRef) {
     sendText = `[context: ${composerActiveRef}] ${text}`;
   }
-  if (sendText) {
-    api().send_message(sendText);
-  } else if (imgs.length) {
-    api().send_message('attached images');
-  }
+  api().send_message(sendText, imgs.length ? imgs : null);
 
   // clear state
   composerAttachments = [];
   composerActiveRef = null;
+  syncPendingMessageImages();
   renderComposerPreviews();
   renderComposerRef();
   renderComposerTextZone();
@@ -665,11 +668,10 @@ renderComposer();
 async function handleEvent(event) {
   if (event.type === 'busy') setBusy(event.busy);
   if (event.type === 'user_message') {
-    if (suppressNextUserMessage) {
-      suppressNextUserMessage = false;
-      return;
-    }
-    addMessage('user', event.text);
+    addMessage('user', event.text, event.images || []);
+    composerAttachments = [];
+    syncPendingMessageImages();
+    renderComposerPreviews();
   }
   if (event.type === 'assistant_delta') addDelta(event.text);
   if (event.type === 'assistant_message') {

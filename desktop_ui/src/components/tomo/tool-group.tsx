@@ -1,5 +1,11 @@
-import { Wrench } from "lucide-react"
+import {
+  ChainOfThought,
+  ChainOfThoughtContent,
+  ChainOfThoughtHeader,
+  ChainOfThoughtStep,
+} from "@/components/ai-elements/chain-of-thought"
 import type { TranscriptItem } from "@/state/desktop-reducer"
+import { Wrench } from "lucide-react"
 
 type ToolItem = Extract<TranscriptItem, { type: "tools" }>
 
@@ -8,19 +14,26 @@ interface ToolGroupProps {
 }
 
 export const ToolGroup = ({ item }: ToolGroupProps) => (
-  <section className="mb-3 w-fit max-w-[88%] overflow-hidden rounded-lg border border-white/15 bg-white/20 text-white backdrop-blur-xl">
-    <details>
-      <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2 text-xs text-white/90 [&::-webkit-details-marker]:hidden">
-        <Wrench className="size-3.5 text-emerald-300" />
-        tools {item.calls.length} tool call{item.calls.length === 1 ? "" : "s"}
-      </summary>
-      <div className="grid gap-1 px-3 pb-2 font-mono text-xs text-white/80">
+  <section className="mb-3 w-fit max-w-[88%] overflow-hidden rounded-lg border border-white/15 bg-white/10 px-3 py-2 text-white">
+    <ChainOfThought defaultOpen>
+      <ChainOfThoughtHeader
+        className="text-white/80 hover:text-white"
+        icon={Wrench}
+      >
+        Tools · {item.calls.length} call{item.calls.length === 1 ? "" : "s"}
+      </ChainOfThoughtHeader>
+      <ChainOfThoughtContent>
         {item.calls.map((call, index) => (
-          <div className="[overflow-wrap:anywhere]" key={`${call.name}-${index}`}>
-            {call.name}: "{call.input || ""}"
-          </div>
+          <ChainOfThoughtStep
+            className="text-white/75"
+            icon={Wrench}
+            key={`${call.name}-${index}`}
+            label={call.name}
+            description={call.input || undefined}
+            status="complete"
+          />
         ))}
-      </div>
-    </details>
+      </ChainOfThoughtContent>
+    </ChainOfThought>
   </section>
 )

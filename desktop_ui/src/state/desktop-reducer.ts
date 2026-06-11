@@ -18,6 +18,11 @@ export type TranscriptItem =
       type: "tools"
       calls: Array<{ name: string; input: string }>
     }
+  | {
+      id: string
+      type: "reasoning"
+      text: string
+    }
 
 export interface DesktopState {
   model: string
@@ -186,13 +191,25 @@ export const desktopReducer = (
     case "busy":
       return { ...state, busy: event.busy }
     case "user_message":
-      return addMessage(state, "user", event.text)
+      return addMessage(state, "user", event.text, event.images || [])
     case "assistant_delta":
       return applyAssistantDelta(state, event.text)
     case "assistant_message":
       return finalizeAssistantMessage(state, event.text, event.images || [])
     case "tool_event":
       return addToolCall(state, event.name, event.input)
+    case "reasoning_event":
+      return {
+        ...state,
+        messages: [
+          ...state.messages,
+          {
+            id: makeId("reasoning"),
+            type: "reasoning",
+            text: event.text,
+          },
+        ],
+      }
     case "approval_request":
       return {
         ...state,
@@ -205,6 +222,12 @@ export const desktopReducer = (
       }
     case "approval_resolved":
       return { ...state, pendingApproval: null }
+    case "cross_gateway_message":
+      return addMessage(
+        state,
+        "assistant",
+        `[from ${event.source}] ${event.text}`,
+      )
     case "error":
       return addMessage(state, "assistant", `Error: ${event.message}`)
     case "voice_state":

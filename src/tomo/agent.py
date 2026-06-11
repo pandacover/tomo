@@ -27,6 +27,7 @@ Tool routing:
 - web_search: search public web when no exact URL is known. Do not use for local repo or memory questions.
 - web_fetch: read a specific public HTTP(S) URL. Use query to focus long pages. Do not use as a search engine.
 - task: delegate broad independent multi-step research/search/work. Do not use for simple questions, user interaction, or unverified side effects.
+- cross_gateway: list running gateways, read recent context from another gateway/channel, or send a message to another gateway. Use when the user asks to coordinate across desktop and Telegram, relay a message to another channel, or inspect what happened on another gateway.
 - grep/ls: do not call; use files_search/glob/read_file instead.
 
 Lifecycle loop to follow for any given task

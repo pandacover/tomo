@@ -17,6 +17,7 @@ from .browser_tools import browser
 from .file_tools import edit_file, glob, read_file, write_file
 from .gateway import extract_tool_errors, get_message_tool_content, get_message_tool_name, get_tool_calls, rectification_prompt, unresolved_failure_reply
 from .model import make_model
+from .cross_gateway_bridge import make_cross_gateway_tool
 from .tools import append_memory, files_search, generate_image, read_memory, terminal, web_fetch, web_search
 
 
@@ -249,6 +250,7 @@ def default_langgraph_tools() -> list[BaseTool]:
         generate_image,
         append_memory,
         read_memory,
+        make_cross_gateway_tool(),
         write_file,
         edit_file,
     ]

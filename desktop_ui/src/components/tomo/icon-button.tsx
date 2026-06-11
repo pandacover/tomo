@@ -21,7 +21,6 @@ export const IconButton = ({ label, children, className, ...props }: IconButtonP
           aria-label={label}
           className={cn("size-10 rounded-lg border-0 bg-transparent text-zinc-300 hover:bg-white/10", className)}
           size="icon"
-          title={label}
           type="button"
           variant="ghost"
           {...props}

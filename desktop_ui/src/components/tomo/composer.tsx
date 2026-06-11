@@ -1,5 +1,5 @@
-import { type ChangeEvent, type KeyboardEvent, useRef, useState } from "react"
-import { Mic, Paperclip, Send, Square, X } from "lucide-react"
+import { type ChangeEvent, type KeyboardEvent, useEffect, useRef, useState } from "react"
+import { Loader, Mic, Paperclip, Send, Square, X } from "lucide-react"
 import { AttachmentPreview } from "@/components/tomo/attachment-preview"
 import { IconButton } from "@/components/tomo/icon-button"
 import { Badge } from "@/components/ui/badge"
@@ -15,6 +15,7 @@ interface ComposerProps {
   bridge: DesktopBridge
   busy: boolean
   disabled: boolean
+  messageCount: number
   model: string
   sessionName: string
   voiceState: VoiceState
@@ -24,16 +25,46 @@ export const Composer = ({
   bridge,
   busy,
   disabled,
+  messageCount,
   model,
   sessionName,
   voiceState,
 }: ComposerProps) => {
   const fileRef = useRef<HTMLInputElement | null>(null)
+  const prevMessageCountRef = useRef(messageCount)
+  const voiceSendPendingRef = useRef(false)
   const [text, setText] = useState("")
   const [attachments, setAttachments] = useState<ComposerAttachment[]>([])
   const [activeRef, setActiveRef] = useState<string | null>(null)
 
+  useEffect(() => {
+    void bridge.setPendingMessageImages(attachments.map((attachment) => attachment.url))
+  }, [attachments, bridge])
+
+  useEffect(() => {
+    if (voiceState === "sending") {
+      voiceSendPendingRef.current = true
+    }
+
+    const messageAdded = messageCount > prevMessageCountRef.current
+    prevMessageCountRef.current = messageCount
+
+    if (voiceSendPendingRef.current && messageAdded) {
+      setText("")
+      setAttachments([])
+      setActiveRef(null)
+      voiceSendPendingRef.current = false
+      return
+    }
+
+    if (voiceState === "idle") {
+      voiceSendPendingRef.current = false
+    }
+  }, [messageCount, voiceState])
+
   const canSubmit = !disabled && (text.trim().length > 0 || attachments.length > 0)
+  const isListening = voiceState === "listening"
+  const isSending = voiceState === "sending"
 
   const handleFiles = (event: ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(event.target.files || [])
@@ -70,12 +101,17 @@ export const Composer = ({
 
     const trimmed = text.trim()
     const sendText = activeRef ? `[context: ${activeRef}] ${trimmed}` : trimmed
-    const result = await bridge.sendMessage(sendText || "attached images")
+    const imageUrls = attachments.map((attachment) => attachment.url)
+    const result = await bridge.sendMessage(
+      sendText,
+      imageUrls.length > 0 ? imageUrls : undefined,
+    )
 
     if (result.ok) {
       setText("")
       setAttachments([])
       setActiveRef(null)
+      void bridge.setPendingMessageImages([])
     }
   }
 
@@ -87,7 +123,7 @@ export const Composer = ({
   }
 
   const toggleVoice = async () => {
-    if (voiceState === "listening" || voiceState === "sending") {
+    if (isListening || isSending) {
       await bridge.cancelVoiceInput()
       return
     }
@@ -97,11 +133,7 @@ export const Composer = ({
 
   return (
     <section className="p-3">
-      <div className="flex flex-col gap-2 rounded-[22px] bg-black/85 p-2.5 text-zinc-100 backdrop-blur-xl">
-        <div className="px-1 text-[10px] text-zinc-400/80">
-          {[model, sessionName].filter(Boolean).join(" · ")}
-        </div>
-
+      <div className="flex flex-col gap-2 rounded-[22px] bg-black/85 p-2.5 text-zinc-100">
         {attachments.length > 0 ? (
           <div className="flex gap-2 px-1">
             {attachments.map((attachment) => (
@@ -137,28 +169,47 @@ export const Composer = ({
             rows={1}
             value={text}
           />
-          <div className="absolute bottom-1.5 left-1.5 right-1.5 flex items-center">
-            <IconButton
-              disabled={disabled}
-              label="Attach image"
-              onClick={() => fileRef.current?.click()}
-            >
-              <Paperclip className="size-5" />
-            </IconButton>
+          <div className="absolute bottom-1.5 left-1.5 right-1.5 flex items-center gap-2">
+            <div className="flex min-w-0 items-center gap-1">
+              <IconButton
+                disabled={disabled}
+                label="Attach image"
+                onClick={() => fileRef.current?.click()}
+              >
+                <Paperclip className="size-5" />
+              </IconButton>
+              {[model, sessionName].filter(Boolean).length > 0 ? (
+                <span className="truncate text-[10px] text-zinc-400/80">
+                  {[model, sessionName].filter(Boolean).join(" · ")}
+                </span>
+              ) : null}
+            </div>
             <div className="flex-1" />
             <div className="flex items-center gap-1">
               <IconButton
                 className={cn(
-                  (voiceState === "listening" || voiceState === "sending") &&
+                  (isListening || isSending) &&
+                    "h-10 w-auto min-w-10 gap-2 px-3",
+                  isListening &&
                     "bg-red-700 text-white hover:bg-red-700",
+                  isSending &&
+                    "bg-white/10 text-zinc-100 hover:bg-white/10",
                   busy && "text-emerald-300",
                 )}
                 disabled={busy && voiceState === "idle"}
-                label={voiceState === "listening" ? "Cancel listening" : voiceState === "sending" ? "Stop sending" : "Voice input"}
+                label={isListening ? "Stop listening" : isSending ? "Cancel send" : "Voice input"}
                 onClick={() => void toggleVoice()}
               >
-                {voiceState === "listening" || voiceState === "sending" ? (
-                  <Square className="size-4 fill-current" />
+                {isListening ? (
+                  <>
+                    <span className="text-xs font-medium leading-none">Listening</span>
+                    <Square className="size-4 fill-current" />
+                  </>
+                ) : isSending ? (
+                  <>
+                    <span className="text-xs font-medium leading-none">Sending</span>
+                    <Loader className="size-4 animate-spin" />
+                  </>
                 ) : (
                   <Mic className="size-5" />
                 )}

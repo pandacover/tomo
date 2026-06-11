@@ -6,6 +6,16 @@ const sleep = (ms: number) => new Promise((resolve) => window.setTimeout(resolve
 
 export const useDesktopRuntime = (bridge: DesktopBridge, dispatch: Dispatch<DesktopAction>) => {
   useEffect(() => {
+    window.__tomoDispatchEvent = (event) => {
+      dispatch({ type: "desktop_event", event })
+    }
+
+    return () => {
+      delete window.__tomoDispatchEvent
+    }
+  }, [dispatch])
+
+  useEffect(() => {
     let cancelled = false
 
     bridge.bootstrap().then((data) => {
