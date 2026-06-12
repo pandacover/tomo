@@ -508,7 +508,12 @@ def test_desktop_bridge_tool_callback_queues_tool_event():
     bridge.send_message("hello")
     wait_for_idle(bridge)
 
-    assert {"type": "tool_event", "name": "web_search", "input": '{"query":"hello"}'} in bridge.poll_events()
+    assert {
+        "type": "tool_event",
+        "name": "web_search",
+        "input": '{"query":"hello"}',
+        "summary": 'Searching "hello" on the web',
+    } in bridge.poll_events()
 
 
 def test_desktop_bridge_delivers_cross_gateway_message_to_ui_and_session(tmp_path, monkeypatch):

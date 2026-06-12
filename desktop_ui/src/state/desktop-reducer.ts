@@ -16,7 +16,7 @@ export type TranscriptItem =
   | {
       id: string
       type: "tools"
-      calls: Array<{ name: string; input: string }>
+      calls: Array<{ name: string; input: string; summary?: string }>
     }
   | {
       id: string
@@ -132,7 +132,12 @@ const finalizeAssistantMessage = (
   }
 }
 
-const addToolCall = (state: DesktopState, name: string, input: string): DesktopState => {
+const addToolCall = (
+  state: DesktopState,
+  name: string,
+  input: string,
+  summary?: string,
+): DesktopState => {
   const groupId = state.currentToolGroupId
 
   if (groupId) {
@@ -140,7 +145,7 @@ const addToolCall = (state: DesktopState, name: string, input: string): DesktopS
       ...state,
       messages: state.messages.map((item) =>
         item.id === groupId && item.type === "tools"
-          ? { ...item, calls: [...item.calls, { name, input }] }
+          ? { ...item, calls: [...item.calls, { name, input, summary }] }
           : item,
       ),
     }
@@ -156,7 +161,7 @@ const addToolCall = (state: DesktopState, name: string, input: string): DesktopS
       {
         id,
         type: "tools",
-        calls: [{ name, input }],
+        calls: [{ name, input, summary }],
       },
     ],
   }
@@ -197,7 +202,7 @@ export const desktopReducer = (
     case "assistant_message":
       return finalizeAssistantMessage(state, event.text, event.images || [])
     case "tool_event":
-      return addToolCall(state, event.name, event.input)
+      return addToolCall(state, event.name, event.input, event.summary)
     case "reasoning_event":
       return {
         ...state,

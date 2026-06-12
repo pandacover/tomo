@@ -1,0 +1,11 @@
+---
+pid: 11188
+cwd: "C:\Users\luvma\OneDrive\Desktop\zero_labs\tomo"
+command: "uv run python -c \"import subprocess, time; from pathlib import Path; cmd=[str(Path('node_modules/.bin/agent-browser.cmd').resolve()), '--session','win-test','open','http://localhost:5173']; t=time.time();
+try:
+ r=subprocess.run(cmd, capture_output=True, text=True, timeout=45); print('done', time.time()-t, r.returncode, r.stdout[:200])
+except Exception as e:
+ print('fail', time.time()-t, e)\""
+started_at: 2026-06-11T20:59:58.178Z
+running_for_ms: 5654998  
+---

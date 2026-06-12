@@ -1,0 +1,11 @@
+---
+pid: 38276
+cwd: "C:\Users\luvma\OneDrive\Desktop\zero_labs\tomo"
+command: "uv run python -c \"import subprocess, time; exe=r'C:\\Users\\luvma\\OneDrive\\Desktop\\zero_labs\\tomo\\node_modules\\agent-browser\\bin\\agent-browser-win32-x64.exe'; t=time.time();
+try:
+ r=subprocess.run([exe,'--session','cap-test','get','title'], capture_output=True, text=True, timeout=20); print('ok', time.time()-t, repr(r.stdout))
+except Exception as e:
+ print('err', time.time()-t, e)\""
+started_at: 2026-06-11T21:03:17.628Z
+running_for_ms: 5474994  
+---

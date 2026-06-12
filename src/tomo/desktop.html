@@ -460,7 +460,7 @@ function addTool(event) {
   currentToolGroup.summary.textContent = `tools ${currentToolGroup.count} tool call${currentToolGroup.count === 1 ? '' : 's'}`;
   const row = document.createElement('div');
   row.className = 'tool-row';
-  row.textContent = `${event.name}: "${event.input || ''}"`;
+  row.textContent = event.summary || event.name;
   currentToolGroup.list.appendChild(row);
   scrollBottom();
   scheduleResize();

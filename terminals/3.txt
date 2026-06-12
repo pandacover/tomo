@@ -1,0 +1,7 @@
+---
+pid: 30864
+cwd: "C:\Users\luvma\OneDrive\Desktop\zero_labs\tomo"
+command: "uv run python -c \"from tomo.browser_tools import browser; import time; t=time.time(); print(browser.invoke({'action':'navigate','url':'http://localhost:5173','timeout_ms':60000})); print('nav elapsed', time.time()-t); t=time.time(); print(browser.invoke({'action':'screenshot','path':'agent-test.png','full_page':False,'timeout_ms':60000})); print('shot elapsed', time.time()-t)\""
+started_at: 2026-06-11T20:54:35.114Z
+running_for_ms: 5845006  
+---

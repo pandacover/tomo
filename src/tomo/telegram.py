@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 import queue
+import math
+import re
 import signal
 import subprocess
 import sys
@@ -40,12 +42,55 @@ YOLO_ENABLED_MESSAGE = "YOLO mode enabled for approval prompts. Dotfile deny rul
 YOLO_STATUS_ENABLED = "YOLO mode is enabled for approval prompts. Dotfile deny rules still apply."
 TELEGRAM_PID_FILENAME = "telegram.pid"
 TELEGRAM_LOG_FILENAME = "telegram.log"
+DEFAULT_LOCATION_WATCH_RADIUS_METERS = 500.0
 
 
 @dataclass
 class PendingTelegramApproval:
     request: ApprovalRequest
     answers: queue.Queue[bool] = field(default_factory=queue.Queue)
+
+
+@dataclass(frozen=True)
+class TelegramLocation:
+    latitude: float
+    longitude: float
+    live_period: int | None = None
+    horizontal_accuracy: float | None = None
+    heading: int | None = None
+    proximity_alert_radius: int | None = None
+
+    @property
+    def kind(self) -> str:
+        return "live" if self.live_period is not None else "static"
+
+    def context_text(self) -> str:
+        parts = [
+            f"latitude {self.latitude}",
+            f"longitude {self.longitude}",
+        ]
+        if self.horizontal_accuracy is not None:
+            parts.append(f"horizontal accuracy {self.horizontal_accuracy} meters")
+        if self.heading is not None:
+            parts.append(f"heading {self.heading} degrees")
+        if self.proximity_alert_radius is not None:
+            parts.append(f"proximity alert radius {self.proximity_alert_radius} meters")
+        if self.live_period is not None:
+            parts.append(f"live period {self.live_period} seconds")
+        return f"Telegram pinned location ({self.kind}): " + ", ".join(parts) + "."
+
+
+@dataclass(frozen=True)
+class LocationWatch:
+    label: str
+    target: TelegramLocation
+    radius_meters: float = DEFAULT_LOCATION_WATCH_RADIUS_METERS
+
+
+@dataclass(frozen=True)
+class MovementWatch:
+    origin: TelegramLocation
+    threshold_meters: float
 
 
 @dataclass
@@ -94,6 +139,9 @@ class TelegramGateway:
         self.busy_chats: set[str] = set()
         self.yolo_chats: set[str] = set()
         self.debug_tool_chats: set[str] = set()
+        self.chat_locations: dict[str, TelegramLocation] = {}
+        self.location_watches: dict[str, list[LocationWatch]] = {}
+        self.movement_watches: dict[str, list[MovementWatch]] = {}
         channels = self._cross_gateway_channels()
         get_cross_gateway_bridge().attach(
             "telegram",
@@ -156,6 +204,10 @@ class TelegramGateway:
 
     def handle_update(self, update: dict[str, object]) -> None:
         message = update.get("message")
+        edited_message = update.get("edited_message")
+        if not isinstance(message, dict) and isinstance(edited_message, dict):
+            self.handle_edited_message(edited_message)
+            return
         if not isinstance(message, dict):
             return
         chat = message.get("chat")
@@ -165,13 +217,33 @@ class TelegramGateway:
         if self.allowed_chat_ids and int(chat_id) not in self.allowed_chat_ids:
             self.send_message(chat_id, "This chat is not allowed to use Tomo.")
             return
+        location = telegram_location(message.get("location"))
+        if location is not None:
+            self.chat_locations[chat_id] = location
+            self.check_location_watches(chat_id, location)
+            self.check_movement_watches(chat_id, location)
         content = self.extract_message_content(message)
         if content is None:
+            if location is not None:
+                self.send_message(chat_id, f"Location pinned for this chat ({location.kind}).")
             return
         if isinstance(content, str):
             self.handle_text(chat_id, content)
             return
-        self.handle_user_content(chat_id, content)
+        self.handle_user_content(chat_id, self.with_location_context(chat_id, content))
+
+    def handle_edited_message(self, message: dict[str, object]) -> None:
+        chat = message.get("chat")
+        if not isinstance(chat, dict) or "id" not in chat:
+            return
+        chat_id = str(chat["id"])
+        if self.allowed_chat_ids and int(chat_id) not in self.allowed_chat_ids:
+            return
+        location = telegram_location(message.get("location"))
+        if location is not None:
+            self.chat_locations[chat_id] = location
+            self.check_location_watches(chat_id, location)
+            self.check_movement_watches(chat_id, location)
 
     def extract_message_content(self, message: dict[str, object]) -> UserContent | None:
         text = str(message.get("text") or "").strip()
@@ -191,6 +263,15 @@ class TelegramGateway:
             {"type": "text", "text": caption},
             {"type": "image_url", "image_url": {"url": image_url}},
         ]
+
+    def with_location_context(self, chat_id: str, content: UserContent) -> UserContent:
+        location = self.chat_locations.get(chat_id)
+        if location is None:
+            return content
+        context = location.context_text()
+        if isinstance(content, str):
+            return f"{context}\n\nUser message: {content}"
+        return [{"type": "text", "text": context}, *content]
 
     def handle_text(self, chat_id: str, text: str) -> None:
         command = telegram_command(text)
@@ -227,12 +308,16 @@ class TelegramGateway:
         if command is not None:
             self.send_message(chat_id, unrecognized_message(text, "gateway"))
             return
+        if self.handle_location_watch_request(chat_id, text):
+            return
+        if self.handle_movement_watch_request(chat_id, text):
+            return
         if chat_id in self.busy_chats:
             self.send_message(chat_id, "Tomo is still working on the previous message.")
             return
 
         self.busy_chats.add(chat_id)
-        thread = threading.Thread(target=self.reply_worker, args=(chat_id, text), daemon=True)
+        thread = threading.Thread(target=self.reply_worker, args=(chat_id, self.with_location_context(chat_id, text)), daemon=True)
         thread.start()
 
     def handle_user_content(self, chat_id: str, content: UserContent) -> None:
@@ -249,6 +334,96 @@ class TelegramGateway:
         self.busy_chats.add(chat_id)
         thread = threading.Thread(target=self.reply_worker, args=(chat_id, content), daemon=True)
         thread.start()
+
+    def handle_location_watch_request(self, chat_id: str, text: str) -> bool:
+        request = parse_location_watch_request(text)
+        if request is None:
+            return False
+        label, radius_meters = request
+        try:
+            target = self.resolve_location_watch_target(label)
+        except Exception:  # noqa: BLE001
+            self.send_message(chat_id, f"I couldn't look up {label} right now. Try again in a bit.")
+            return True
+        if target is None:
+            self.send_message(chat_id, f"I couldn't find a location for {label}. Send a more specific place name.")
+            return True
+        watch = LocationWatch(label=label, target=target, radius_meters=radius_meters)
+        self.location_watches.setdefault(chat_id, []).append(watch)
+        distance_text = format_distance(radius_meters)
+        if chat_id in self.chat_locations:
+            self.check_location_watches(chat_id, self.chat_locations[chat_id])
+            if watch not in self.location_watches.get(chat_id, []):
+                return True
+        self.send_message(chat_id, f"Got it. I'll let you know when you're within {distance_text} of {label}.")
+        return True
+
+    def resolve_location_watch_target(self, label: str) -> TelegramLocation | None:
+        response = self.client.get(
+            "https://nominatim.openstreetmap.org/search",
+            params={"q": label, "format": "jsonv2", "limit": 1},
+            headers={"User-Agent": "tomo-telegram-location-watch/1.0"},
+            timeout=15,
+        )
+        response.raise_for_status()
+        results = response.json()
+        if not isinstance(results, list) or not results:
+            return None
+        result = results[0]
+        if not isinstance(result, dict):
+            return None
+        try:
+            return TelegramLocation(latitude=float(result["lat"]), longitude=float(result["lon"]))
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    def check_location_watches(self, chat_id: str, location: TelegramLocation) -> None:
+        watches = self.location_watches.get(chat_id)
+        if not watches:
+            return
+        remaining: list[LocationWatch] = []
+        for watch in watches:
+            distance = distance_meters(location, watch.target)
+            if distance <= watch.radius_meters:
+                self.send_message(
+                    chat_id,
+                    f"You're near {watch.label} now, about {format_distance(distance)} away.",
+                )
+                continue
+            remaining.append(watch)
+        if remaining:
+            self.location_watches[chat_id] = remaining
+        else:
+            self.location_watches.pop(chat_id, None)
+
+    def handle_movement_watch_request(self, chat_id: str, text: str) -> bool:
+        threshold_meters = parse_movement_watch_request(text)
+        if threshold_meters is None:
+            return False
+        origin = self.chat_locations.get(chat_id)
+        if origin is None:
+            self.send_message(chat_id, "Share your live location first, then ask me to watch for movement.")
+            return True
+        watch = MovementWatch(origin=origin, threshold_meters=threshold_meters)
+        self.movement_watches.setdefault(chat_id, []).append(watch)
+        self.send_message(chat_id, f"Got it. I'll text you when you move at least {format_distance(threshold_meters)}.")
+        return True
+
+    def check_movement_watches(self, chat_id: str, location: TelegramLocation) -> None:
+        watches = self.movement_watches.get(chat_id)
+        if not watches:
+            return
+        remaining: list[MovementWatch] = []
+        for watch in watches:
+            distance = distance_meters(watch.origin, location)
+            if distance >= watch.threshold_meters:
+                self.send_message(chat_id, f"You've moved about {format_distance(distance)}.")
+                continue
+            remaining.append(watch)
+        if remaining:
+            self.movement_watches[chat_id] = remaining
+        else:
+            self.movement_watches.pop(chat_id, None)
 
     def reply_worker(self, chat_id: str, content: UserContent) -> None:
         done = threading.Event()
@@ -506,6 +681,132 @@ def largest_telegram_photo(photos: list[object]) -> dict[str, object] | None:
     return max(candidates, key=lambda photo: int(photo.get("file_size") or photo.get("width") or 0))
 
 
+def telegram_location(value: object) -> TelegramLocation | None:
+    if not isinstance(value, dict):
+        return None
+    try:
+        latitude = float(value["latitude"])
+        longitude = float(value["longitude"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    return TelegramLocation(
+        latitude=latitude,
+        longitude=longitude,
+        live_period=optional_int(value.get("live_period")),
+        horizontal_accuracy=optional_float(value.get("horizontal_accuracy")),
+        heading=optional_int(value.get("heading")),
+        proximity_alert_radius=optional_int(value.get("proximity_alert_radius")),
+    )
+
+
+def parse_location_watch_request(text: str) -> tuple[str, float] | None:
+    normalized = " ".join(text.strip().split())
+    lowered = normalized.lower()
+    if not re.search(r"\b(let me know|notify me|alert me|tell me|remind me)\b", lowered):
+        return None
+    if not re.search(r"\b(near|nearby|close to|around|within)\b", lowered):
+        return None
+
+    radius = parse_location_watch_radius(normalized) or DEFAULT_LOCATION_WATCH_RADIUS_METERS
+    target = parse_location_watch_target(normalized)
+    if target is None:
+        return None
+    return target, radius
+
+
+def parse_movement_watch_request(text: str) -> float | None:
+    normalized = " ".join(text.strip().split())
+    lowered = normalized.lower()
+    if not re.search(r"\b(text me|let me know|notify me|alert me|tell me|remind me)\b", lowered):
+        return None
+    if not re.search(r"\b(move|moved|moving|walk|walked|travel|traveled|travelled)\b", lowered):
+        return None
+    match = re.search(
+        r"\b(\d+(?:\.\d+)?)\s*(m|meter|meters|metre|metres|km|kilometer|kilometers|kilometre|kilometres)\b",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return None
+    value = float(match.group(1))
+    unit = match.group(2).lower()
+    if unit in {"km", "kilometer", "kilometers", "kilometre", "kilometres"}:
+        return value * 1000
+    return value
+
+
+def parse_location_watch_target(text: str) -> str | None:
+    patterns = [
+        r"\b(?:nearby|near|close to|around)\s+(.+)$",
+        r"\bwithin\s+.+?\s+(?:of|from)\s+(.+)$",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if not match:
+            continue
+        target = clean_location_watch_target(match.group(1))
+        if target:
+            return target
+    return None
+
+
+def clean_location_watch_target(target: str) -> str:
+    target = re.sub(r"^[\s:,-]+", "", target)
+    target = re.sub(r"[.?!\s]+$", "", target)
+    target = re.sub(r"\b(?:please|pls|thanks|thank you)\b[.?!\s]*$", "", target, flags=re.IGNORECASE)
+    return target.strip()
+
+
+def parse_location_watch_radius(text: str) -> float | None:
+    match = re.search(
+        r"\bwithin\s+(\d+(?:\.\d+)?)\s*(m|meter|meters|metre|metres|km|kilometer|kilometers|kilometre|kilometres)\b",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return None
+    value = float(match.group(1))
+    unit = match.group(2).lower()
+    if unit in {"km", "kilometer", "kilometers", "kilometre", "kilometres"}:
+        return value * 1000
+    return value
+
+
+def distance_meters(first: TelegramLocation, second: TelegramLocation) -> float:
+    radius = 6371000.0
+    first_lat = math.radians(first.latitude)
+    second_lat = math.radians(second.latitude)
+    delta_lat = math.radians(second.latitude - first.latitude)
+    delta_lon = math.radians(second.longitude - first.longitude)
+    a = math.sin(delta_lat / 2) ** 2 + math.cos(first_lat) * math.cos(second_lat) * math.sin(delta_lon / 2) ** 2
+    return radius * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+
+def format_distance(meters: float) -> str:
+    if meters >= 1000:
+        kilometers = meters / 1000
+        return f"{kilometers:.1f} km" if kilometers < 10 else f"{kilometers:.0f} km"
+    return f"{max(1, round(meters))} m"
+
+
+def optional_float(value: object) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def optional_int(value: object) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def decode_data_url(data_url: str) -> tuple[str, bytes]:
     header, encoded = data_url.split(",", 1)
     media_type = header[5:].split(";", 1)[0] or "application/octet-stream"
@@ -550,8 +851,10 @@ def render_tool_errors_tree(errors: tuple[str, ...]) -> str:
 
 
 def format_tool_event(event: ToolCallLifecycleEvent, *, full_input: bool = False) -> str:
+    if not full_input:
+        return event.summary
     args = format_tool_input(event.input, limit=None if full_input else 50)
-    return f'{event.name}("{args}")'
+    return f'{event.summary} ("{args}")'
 
 
 def telegram_command(text: str) -> str | None:

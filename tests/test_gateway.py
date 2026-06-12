@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from tomo.gateway import TomoGateway, ToolCallLifecycleEvent, extract_agent_trace, format_tool_input
+from tomo.gateway import TomoGateway, ToolCallLifecycleEvent, extract_agent_trace, format_tool_input, summarize_tool_call
 from tomo.tools import ApprovalRequest
 
 
@@ -115,6 +115,49 @@ def test_tomo_gateway_extracts_image_url_markers_from_text(tmp_path, monkeypatch
     assert reply.images == ("https://example.com/image.png",)
 
 
+def test_tomo_gateway_ignores_trailing_tool_message_when_extracting_reply(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    agent = SimpleNamespace(
+        invoke=lambda *args, **kwargs: {
+            "messages": [
+                {"role": "assistant", "content": "Here is the answer."},
+                {
+                    "type": "tool",
+                    "name": "web_search",
+                    "tool_call_id": "call-1",
+                    "content": "RAW SEARCH RESULTS SHOULD NOT BE FINAL",
+                },
+            ]
+        }
+    )
+    gateway = TomoGateway(responder=Responder(), agent=agent)
+
+    reply = gateway.send_text_with_events("chat-1", "search")
+
+    assert reply.text == "Here is the answer."
+
+
+def test_tomo_gateway_returns_empty_reply_for_only_tool_messages(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    agent = SimpleNamespace(
+        invoke=lambda *args, **kwargs: {
+            "messages": [
+                {
+                    "type": "tool",
+                    "name": "web_search",
+                    "tool_call_id": "call-1",
+                    "content": "RAW SEARCH RESULTS SHOULD NOT BE FINAL",
+                },
+            ]
+        }
+    )
+    gateway = TomoGateway(responder=Responder(), agent=agent)
+
+    reply = gateway.send_text_with_events("chat-1", "search")
+
+    assert reply.text == ""
+
+
 def test_tomo_gateway_resumes_interrupt_with_approval(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     responder = Responder(approved=True)
@@ -146,10 +189,10 @@ def test_extract_agent_trace_reads_reasoning_summary_and_tool_statuses():
     trace = extract_agent_trace(result)
 
     assert trace.reasoning_summary == "Checked the file before editing."
-    assert trace.render() == 'read: "{"path":"notes.txt"}"'
+    assert trace.render() == "Reading notes.txt file"
     assert (
         trace.render(include_reasoning=True)
-        == 'Reasoning summary: Checked the file before editing.\nread: "{"path":"notes.txt"}"'
+        == "Reasoning summary: Checked the file before editing.\nReading notes.txt file"
     )
 
 
@@ -163,7 +206,7 @@ def test_extract_agent_trace_marks_error_tool_message_failed():
 
     trace = extract_agent_trace(result)
 
-    assert trace.render() == 'web_fetch: "{"url":"https://example.com"}"\nTool error: web_fetch: Error: blocked address'
+    assert trace.render() == "Reading https://example.com\nTool error: web_fetch: Error: blocked address"
     assert trace.tool_errors == ("web_fetch: Error: blocked address",)
 
 
@@ -296,9 +339,15 @@ def test_format_tool_input_normalizes_and_truncates_single_line():
 def test_tool_event_render_can_show_full_input():
     event = ToolCallLifecycleEvent(name="terminal", input={"command": "x" * 80})
 
-    assert event.render().endswith('..."')
+    assert event.render().startswith("Running ")
     assert len(event.render()) < len(event.render(full_input=True))
-    assert event.render(full_input=True) == 'terminal: "{"command":"' + ("x" * 80) + '"}"'
+    assert event.render(full_input=True) == 'Running "' + ("x" * 80) + '": "{"command":"' + ("x" * 80) + '"}"'
+
+
+def test_summarize_tool_call_uses_sentence_style_for_common_tools():
+    assert summarize_tool_call("read_file", {"path": "src/tomo/telegram.py"}) == "Reading telegram.py file"
+    assert summarize_tool_call("web_search", {"query": "best nearby cafes"}) == 'Searching "best nearby cafes" on the web'
+    assert summarize_tool_call("files_search", {"query": "tool events"}) == 'Searching files for "tool events"'
 
 
 class StreamingAgent:
@@ -329,7 +378,7 @@ def test_tomo_gateway_emits_streaming_tool_events_in_order(tmp_path, monkeypatch
     reply = gateway.send_text_with_events("chat-1", "search", on_event=lambda event: events.append(event.render()))
 
     assert reply.text == "done"
-    assert events == ['web_search: "{"query":"hermes"}"']
+    assert events == ['Searching "hermes" on the web']
     assert agent.invoked is False
 
 
@@ -372,7 +421,7 @@ def test_tomo_gateway_uses_stream_events_projection(tmp_path, monkeypatch):
     reply = gateway.send_text_with_events("chat-1", "fetch", on_event=lambda event: events.append(event.render()))
 
     assert agent.stream_called is True
-    assert events == ['web_fetch: "{"url":"https://example.com/long/path"}"']
+    assert events == ["Reading https://example.com/long/path"]
     assert reply.text == "final answer"
 
 
@@ -416,7 +465,7 @@ def test_tomo_gateway_streams_raw_events_and_ignores_tool_output_as_reply(tmp_pa
         on_text_delta=deltas.append,
     )
 
-    assert events == ['web_search: "{"query":"Hermes Agent"}"']
+    assert events == ['Searching "Hermes Agent" on the web']
     assert deltas == ["Hermes", " Agent"]
     assert reply.text == "Hermes Agent"
 
@@ -528,7 +577,7 @@ def test_tomo_gateway_uses_messages_updates_stream_without_tool_output_reply(tmp
         on_text_delta=deltas.append,
     )
 
-    assert events == ['web_search: "{"query":"Hermes Agent"}"']
+    assert events == ['Searching "Hermes Agent" on the web']
     assert deltas == ["Hermes", " Agent"]
     assert reply.text == "Hermes Agent"
 

@@ -1,0 +1,17 @@
+---
+pid: 27856
+cwd: "C:\Users\luvma\OneDrive\Desktop\zero_labs\tomo"
+command: "taskkill /F /IM agent-browser-win32-x64.exe 2>$null; npx agent-browser close --all; uv run python -c \"from tomo.browser_tools import browser; print(browser.invoke({'action':'navigate','url':'http://localhost:5173'})); print(browser.invoke({'action':'screenshot','path':'localhost-5173-fixed.png'}))\""
+started_at: 2026-06-11T21:07:27.754Z
+running_for_ms: 5135011  
+---
+SUCCESS: The process "agent-browser-win32-x64.exe" with PID 1684 has been terminated.
+✓ Closed session: pipe-test
+✓ Closed session: ps-test
+✓ Closed session: win-test
+✓ Closed session: win-test2
+URL: http://localhost:5173/
+Title: AGENT // CODEX
+Screenshot saved: C:\Users\luvma\OneDrive\Desktop\zero_labs\tomo\localhost-5173-fixed.png
+URL: http://localhost:5173/
+Title: AGENT // CODEX

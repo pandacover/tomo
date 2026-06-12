@@ -40,7 +40,7 @@ export type DesktopEvent =
   | { type: "user_message"; text: string; images?: string[] }
   | { type: "assistant_delta"; text: string }
   | { type: "assistant_message"; text: string; images?: string[] }
-  | { type: "tool_event"; name: string; input: string }
+  | { type: "tool_event"; name: string; input: string; summary?: string }
   | { type: "reasoning_event"; text: string }
   | ({ type: "approval_request" } & ApprovalRequest)
   | { type: "approval_resolved"; id: string; approved: boolean }

@@ -12,7 +12,13 @@ from tomo.telegram import (
     TelegramGateway,
     YOLO_ENABLED_MESSAGE,
     YOLO_STATUS_ENABLED,
+    LocationWatch,
+    MovementWatch,
+    TelegramLocation,
+    distance_meters,
     decode_data_url,
+    parse_location_watch_request,
+    parse_movement_watch_request,
     parse_allowed_chat_ids,
     process_is_running,
     read_pid,
@@ -20,6 +26,7 @@ from tomo.telegram import (
     start_telegram,
     stop_telegram,
     telegram_command,
+    telegram_location,
     telegram_log_path,
     telegram_pid_path,
     write_pid,
@@ -385,10 +392,241 @@ def test_telegram_gateway_routes_text_to_tomo():
 
     assert tomo.messages == [("123", "hello")]
     assert [(method, payload["text"]) for method, payload in gateway.calls] == [
-        ("sendMessage", 'Tool calls (1)\n• web_search("{"query":"hello"}")'),
+        ("sendMessage", 'Tool calls (1)\n• Searching "hello" on the web'),
         ("sendMessage", "streamed reply"),
     ]
     assert all("link_preview_options" not in payload for _, payload in gateway.calls)
+
+
+def test_telegram_location_parser_reads_static_and_live_location():
+    static = telegram_location({"latitude": "12.34", "longitude": 56.78})
+    live = telegram_location(
+        {
+            "latitude": 12.34,
+            "longitude": 56.78,
+            "live_period": 3600,
+            "horizontal_accuracy": 8.5,
+            "heading": 90,
+            "proximity_alert_radius": 50,
+        }
+    )
+
+    assert static is not None
+    assert static.kind == "static"
+    assert static.context_text() == "Telegram pinned location (static): latitude 12.34, longitude 56.78."
+    assert live is not None
+    assert live.kind == "live"
+    assert "live period 3600 seconds" in live.context_text()
+    assert "horizontal accuracy 8.5 meters" in live.context_text()
+
+
+def test_telegram_gateway_pins_location_for_later_text():
+    tomo = FakeTomo()
+    gateway = FakeTelegram(tomo=tomo)
+
+    gateway.handle_update({"message": {"chat": {"id": 123}, "location": {"latitude": 12.34, "longitude": 56.78}}})
+    gateway.handle_update({"message": {"chat": {"id": 123}, "text": "what is nearby?"}})
+    deadline = time.monotonic() + 1
+    while len(tomo.messages) < 1 and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    assert gateway.sent[0] == ("123", "Location pinned for this chat (static).")
+    assert tomo.messages[-1] == (
+        "123",
+        "Telegram pinned location (static): latitude 12.34, longitude 56.78.\n\nUser message: what is nearby?",
+    )
+
+
+def test_telegram_gateway_location_context_does_not_break_commands():
+    tomo = FakeTomo()
+    gateway = FakeTelegram(tomo=tomo)
+
+    gateway.handle_update({"message": {"chat": {"id": 123}, "location": {"latitude": 12.34, "longitude": 56.78}}})
+    gateway.handle_update({"message": {"chat": {"id": 123}, "text": "/start"}})
+
+    assert tomo.messages == []
+    assert gateway.sent[-1] == ("123", "Tomo is ready. Send a message to chat.")
+
+
+def test_telegram_gateway_updates_live_location_from_edited_message():
+    tomo = FakeTomo()
+    gateway = FakeTelegram(tomo=tomo)
+
+    gateway.handle_update(
+        {
+            "message": {
+                "chat": {"id": 123},
+                "location": {"latitude": 12.34, "longitude": 56.78, "live_period": 3600},
+            }
+        }
+    )
+    gateway.handle_update(
+        {
+            "edited_message": {
+                "chat": {"id": 123},
+                "location": {"latitude": 21.43, "longitude": 87.65, "live_period": 3600},
+            }
+        }
+    )
+    gateway.handle_update({"message": {"chat": {"id": 123}, "text": "where am I now?"}})
+    deadline = time.monotonic() + 1
+    while len(tomo.messages) < 1 and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    assert tomo.messages[-1] == (
+        "123",
+        "Telegram pinned location (live): latitude 21.43, longitude 87.65, live period 3600 seconds.\n\n"
+        "User message: where am I now?",
+    )
+
+
+def test_parse_location_watch_request_reads_target_and_distance():
+    assert parse_location_watch_request("dude let me know whenever I am nearby Indiranagar") == ("Indiranagar", 500.0)
+    assert parse_location_watch_request("notify me when I am within 1.5 km of Cubbon Park please") == ("Cubbon Park", 1500.0)
+    assert parse_location_watch_request("what is nearby?") is None
+
+
+def test_parse_movement_watch_request_reads_threshold():
+    assert parse_movement_watch_request("text me if I move 5 meters") == 5.0
+    assert parse_movement_watch_request("let me know when I have moved 1.5 km") == 1500.0
+    assert parse_movement_watch_request("what is nearby?") is None
+
+
+def test_distance_meters_uses_haversine_distance():
+    first = TelegramLocation(latitude=12.9716, longitude=77.5946)
+    second = TelegramLocation(latitude=12.9725, longitude=77.5946)
+
+    assert 90 <= distance_meters(first, second) <= 110
+
+
+def test_telegram_gateway_sets_location_watch_from_text():
+    gateway = FakeTelegram()
+    gateway.resolve_location_watch_target = lambda label: TelegramLocation(latitude=12.34, longitude=56.78)  # type: ignore[method-assign]
+
+    gateway.handle_text("123", "dude let me know whenever I am nearby Cubbon Park")
+
+    assert gateway.location_watches["123"] == [
+        LocationWatch(
+            label="Cubbon Park",
+            target=TelegramLocation(latitude=12.34, longitude=56.78),
+            radius_meters=500.0,
+        )
+    ]
+    assert gateway.sent == [("123", "Got it. I'll let you know when you're within 500 m of Cubbon Park.")]
+
+
+def test_telegram_gateway_location_watch_triggers_on_live_location_edit_once():
+    gateway = FakeTelegram()
+    gateway.location_watches["123"] = [
+        LocationWatch(
+            label="Cubbon Park",
+            target=TelegramLocation(latitude=12.9716, longitude=77.5946),
+            radius_meters=150.0,
+        )
+    ]
+
+    gateway.handle_update(
+        {
+            "edited_message": {
+                "chat": {"id": 123},
+                "location": {"latitude": 12.9700, "longitude": 77.5946, "live_period": 3600},
+            }
+        }
+    )
+    gateway.handle_update(
+        {
+            "edited_message": {
+                "chat": {"id": 123},
+                "location": {"latitude": 12.9717, "longitude": 77.5946, "live_period": 3600},
+            }
+        }
+    )
+    gateway.handle_update(
+        {
+            "edited_message": {
+                "chat": {"id": 123},
+                "location": {"latitude": 12.9717, "longitude": 77.5946, "live_period": 3600},
+            }
+        }
+    )
+
+    assert gateway.sent == [("123", "You're near Cubbon Park now, about 11 m away.")]
+    assert "123" not in gateway.location_watches
+
+
+def test_telegram_gateway_location_watch_reports_unknown_target():
+    gateway = FakeTelegram()
+    gateway.resolve_location_watch_target = lambda label: None  # type: ignore[method-assign]
+
+    gateway.handle_text("123", "alert me when I am near Some Unknown Place")
+
+    assert gateway.sent == [("123", "I couldn't find a location for Some Unknown Place. Send a more specific place name.")]
+    assert gateway.location_watches == {}
+
+
+def test_telegram_gateway_location_watch_handles_lookup_failure():
+    gateway = FakeTelegram()
+
+    def fail_lookup(_label: str) -> TelegramLocation:
+        raise RuntimeError("geocoder down")
+
+    gateway.resolve_location_watch_target = fail_lookup  # type: ignore[method-assign]
+
+    gateway.handle_text("123", "alert me when I am near Cubbon Park")
+
+    assert gateway.sent == [("123", "I couldn't look up Cubbon Park right now. Try again in a bit.")]
+    assert gateway.location_watches == {}
+
+
+def test_telegram_gateway_movement_watch_requires_current_location():
+    gateway = FakeTelegram()
+
+    gateway.handle_text("123", "text me if I move 5 meters")
+
+    assert gateway.sent == [("123", "Share your live location first, then ask me to watch for movement.")]
+    assert gateway.movement_watches == {}
+
+
+def test_telegram_gateway_movement_watch_triggers_on_live_location_edit_once():
+    gateway = FakeTelegram()
+    origin = TelegramLocation(latitude=12.9716, longitude=77.5946, live_period=3600)
+    gateway.chat_locations["123"] = origin
+
+    gateway.handle_text("123", "text me if I move 5 meters")
+
+    assert gateway.movement_watches["123"] == [MovementWatch(origin=origin, threshold_meters=5.0)]
+    assert gateway.sent == [("123", "Got it. I'll text you when you move at least 5 m.")]
+
+    gateway.handle_update(
+        {
+            "edited_message": {
+                "chat": {"id": 123},
+                "location": {"latitude": 12.97162, "longitude": 77.5946, "live_period": 3600},
+            }
+        }
+    )
+    gateway.handle_update(
+        {
+            "edited_message": {
+                "chat": {"id": 123},
+                "location": {"latitude": 12.97166, "longitude": 77.5946, "live_period": 3600},
+            }
+        }
+    )
+    gateway.handle_update(
+        {
+            "edited_message": {
+                "chat": {"id": 123},
+                "location": {"latitude": 12.97170, "longitude": 77.5946, "live_period": 3600},
+            }
+        }
+    )
+
+    assert gateway.sent == [
+        ("123", "Got it. I'll text you when you move at least 5 m."),
+        ("123", "You've moved about 7 m."),
+    ]
+    assert "123" not in gateway.movement_watches
 
 
 def test_telegram_gateway_routes_photo_to_tomo():
@@ -561,12 +799,12 @@ def test_telegram_gateway_groups_consecutive_tool_calls_by_editing_same_message(
     gateway.reply_worker("123", "hello")
 
     assert [(method, payload["text"]) for method, payload in gateway.calls] == [
-        ("sendMessage", 'Tool calls (1)\n• files_search("{"query":"telegram"}")'),
+        ("sendMessage", 'Tool calls (1)\n• Searching files for "telegram"'),
         (
             "editMessageText",
             'Tool calls (2)\n'
-            '• files_search("{"query":"telegram"}")\n'
-            '• read_file("{"path":"src/tomo/telegram.py"}")',
+            '• Searching files for "telegram"\n'
+            "• Reading telegram.py file",
         ),
         ("sendMessage", "done"),
     ]
@@ -683,9 +921,9 @@ def test_telegram_gateway_debug_tool_toggle_controls_tool_event_truncation():
     gateway.reply_worker("123", "run")
     full_tool_message = gateway.sent[-2][1]
 
-    assert truncated_tool_message.endswith('...")')
+    assert truncated_tool_message == 'Tool calls (1)\n• Running "' + ("x" * 80) + '"'
     assert len(full_tool_message) > len(truncated_tool_message)
-    assert full_tool_message == 'Tool calls (1)\n• terminal("{"command":"' + ("x" * 80) + '"}")'
+    assert full_tool_message == 'Tool calls (1)\n• Running "' + ("x" * 80) + '" ("{"command":"' + ("x" * 80) + '"}")'
     assert ("123", "Tool debug output enabled.") in gateway.sent
 
     gateway.handle_text("123", "/debug-tool disable")

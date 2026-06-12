@@ -28,7 +28,7 @@ export const ToolGroup = ({ item }: ToolGroupProps) => (
             className="text-white/75"
             icon={Wrench}
             key={`${call.name}-${index}`}
-            label={call.name}
+            label={call.summary || call.name}
             description={call.input || undefined}
             status="complete"
           />

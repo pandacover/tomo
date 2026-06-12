@@ -1,0 +1,7 @@
+---
+pid: 26568
+cwd: "C:\Users\luvma\OneDrive\Desktop\zero_labs\tomo"
+command: "npx agent-browser doctor --quick --offline"
+started_at: 2026-06-11T20:49:19.382Z
+running_for_ms: 6280007  
+---

@@ -247,6 +247,7 @@ class DesktopBridge:
                         "type": "tool_event",
                         "name": event.name,
                         "input": format_tool_input(event.input),
+                        "summary": event.summary,
                     }
                 ),
                 on_text_delta=lambda delta: self.emitter(

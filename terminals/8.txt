@@ -1,0 +1,9 @@
+---
+pid: 34608
+cwd: "C:\Users\luvma\OneDrive\Desktop\zero_labs\tomo"
+command: "taskkill /F /IM agent-browser-win32-x64.exe 2>$null; uv run python -c \"import subprocess, time; exe=r'C:\\Users\\luvma\\OneDrive\\Desktop\\zero_labs\\tomo\\node_modules\\agent-browser\\bin\\agent-browser-win32-x64.exe'; t=time.time(); r=subprocess.run([exe,'--session','exe-test','open','http://localhost:5173'], capture_output=True, text=True, timeout=60); print(time.time()-t, r.returncode, r.stdout[:300])\""
+started_at: 2026-06-11T21:01:00.370Z
+running_for_ms: 5569986  
+---
+SUCCESS: The process "agent-browser-win32-x64.exe" with PID 32240 has been terminated.
+SUCCESS: The process "agent-browser-win32-x64.exe" with PID 34580 has been terminated.

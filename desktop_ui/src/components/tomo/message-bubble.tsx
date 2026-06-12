@@ -1,7 +1,6 @@
 import { memo } from "react"
 import type { TranscriptItem } from "@/state/desktop-reducer"
 import { cn } from "@/lib/utils"
-import { Streamdown } from "streamdown"
 
 type MessageItem = Extract<TranscriptItem, { type: "message" }>
 
@@ -10,9 +9,7 @@ interface MessageBubbleProps {
   isStreaming?: boolean
 }
 
-export const MessageBubble = memo(({ item, isStreaming = false }: MessageBubbleProps) => {
-  const showStreamingText = item.role === "assistant" && isStreaming
-
+export const MessageBubble = memo(({ item }: MessageBubbleProps) => {
   return (
     <section className="mb-3 flex max-w-[88%] flex-col gap-2">
       {item.images.length > 0 ? (
@@ -36,13 +33,7 @@ export const MessageBubble = memo(({ item, isStreaming = false }: MessageBubbleP
               : "border-white/15 bg-white/20",
           )}
         >
-          {showStreamingText ? (
-            <p className="[overflow-wrap:anywhere] whitespace-pre-wrap">{item.text}</p>
-          ) : (
-            <Streamdown className="[overflow-wrap:anywhere] [&_*:first-child]:mt-0 [&_*:last-child]:mb-0">
-              {item.text}
-            </Streamdown>
-          )}
+          <p className="[overflow-wrap:anywhere] whitespace-pre-wrap">{item.text}</p>
         </div>
       ) : null}
     </section>

@@ -29,7 +29,13 @@ class ToolCallLifecycleEvent:
     input: object = None
 
     def render(self, *, full_input: bool = False) -> str:
-        return f'{self.name}: "{format_tool_input(self.input, limit=None if full_input else 50)}"'
+        if full_input:
+            return f'{self.summary}: "{format_tool_input(self.input, limit=None)}"'
+        return self.summary
+
+    @property
+    def summary(self) -> str:
+        return summarize_tool_call(self.name, self.input)
 
 
 @dataclass(frozen=True)
@@ -74,6 +80,107 @@ def format_tool_input(value: object, *, limit: int | None = 50) -> str:
     if limit is None:
         return text
     return f"{text[:limit]}..." if len(text) > limit else text
+
+
+def summarize_tool_call(name: str, input_value: object) -> str:
+    args = parse_tool_args(input_value)
+    tool_name = name.strip()
+    query = first_string(args, "query", "q")
+    path = first_string(args, "path", "file_path")
+    url = first_string(args, "url")
+    command = first_string(args, "command")
+    prompt = first_string(args, "prompt")
+    text = first_string(args, "text")
+    when = first_string(args, "when")
+    action = first_string(args, "action")
+    cwd = first_string(args, "cwd")
+
+    match tool_name:
+        case "read_file" | "read":
+            return f"Reading {friendly_path(path)} file" if path else "Reading a file"
+        case "write_file":
+            return f"Writing {friendly_path(path)} file" if path else "Writing a file"
+        case "edit_file":
+            return f"Editing {friendly_path(path)} file" if path else "Editing a file"
+        case "files_search":
+            return f"Searching files for {quote_summary(query)}" if query else "Searching files"
+        case "glob":
+            pattern = first_string(args, "pattern", "glob")
+            return f"Finding files matching {quote_summary(pattern)}" if pattern else "Finding files"
+        case "terminal":
+            suffix = f" in {friendly_path(cwd)}" if cwd and cwd != "." else ""
+            return f"Running {quote_summary(command)}{suffix}" if command else "Running a terminal command"
+        case "browser":
+            browser_action = first_string(args, "action") or "browser action"
+            target = first_string(args, "url", "selector", "text")
+            return f"Using browser to {browser_action}" + (f" on {quote_summary(target)}" if target else "")
+        case "web_search":
+            return f"Searching {quote_summary(query)} on the web" if query else "Searching the web"
+        case "web_fetch":
+            return f"Reading {url}" if url else "Reading a web page"
+        case "generate_image":
+            return f"Generating an image from {quote_summary(prompt)}" if prompt else "Generating an image"
+        case "append_memory":
+            return "Saving a memory"
+        case "read_memory":
+            return f"Searching memory for {quote_summary(query)}" if query else "Searching memory"
+        case "schedule_reminder":
+            if text and when:
+                return f"Scheduling reminder {quote_summary(text)} for {when}"
+            return "Scheduling a reminder"
+        case "schedule_action" | "schedule_task":
+            if action and when:
+                return f"Scheduling {quote_summary(action)} for {when}"
+            return "Scheduling an action"
+        case "list_scheduled_tasks":
+            return "Checking scheduled tasks"
+        case "cancel_scheduled_task":
+            return "Cancelling a scheduled task"
+        case "cross_gateway":
+            return f"Using cross-gateway action {quote_summary(action)}" if action else "Using cross-gateway bridge"
+        case _:
+            readable = tool_name.replace("_", " ").strip() or "tool"
+            target = query or path or url or command or prompt or text
+            return f"Using {readable}" + (f" for {quote_summary(target)}" if target else "")
+
+
+def parse_tool_args(value: object) -> Mapping[str, object]:
+    if isinstance(value, Mapping):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, Mapping) else {}
+    return {}
+
+
+def first_string(args: Mapping[str, object], *keys: str) -> str | None:
+    for key in keys:
+        value = args.get(key)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return None
+
+
+def quote_summary(text: str | None) -> str:
+    if not text:
+        return ""
+    normalized = " ".join(text.split())
+    if len(normalized) > 80:
+        normalized = normalized[:77].rstrip() + "..."
+    return f'"{normalized}"'
+
+
+def friendly_path(path: str | None) -> str:
+    if not path:
+        return "the"
+    name = Path(path).name
+    return name or path
 
 
 @dataclass
@@ -297,12 +404,23 @@ def latest_assistant_content(result: object) -> object | None:
         messages = result.get("messages")
         if isinstance(messages, list):
             for message in reversed(messages):
-                role = message.get("role") if isinstance(message, Mapping) else getattr(message, "role", None)
-                message_type = message.get("type") if isinstance(message, Mapping) else getattr(message, "type", None)
-                if role not in {None, "assistant", "ai"} and message_type not in {None, "ai", "assistant"}:
+                if not is_assistant_reply_message(message):
                     continue
                 return message.get("content") if isinstance(message, Mapping) else getattr(message, "content", None)
     return getattr(result, "content", None)
+
+
+def is_assistant_reply_message(message: object) -> bool:
+    if get_message_tool_name(message) is not None:
+        return False
+    role = message.get("role") if isinstance(message, Mapping) else getattr(message, "role", None)
+    message_type = message.get("type") if isinstance(message, Mapping) else getattr(message, "type", None)
+    class_name = message.__class__.__name__
+    if role is not None:
+        return str(role) in {"assistant", "ai"}
+    if message_type is not None:
+        return str(message_type) in {"assistant", "ai"}
+    return class_name in {"AIMessage", "AIMessageChunk"}
 
 
 def add_skill_context_to_user_content(content: UserContent) -> UserContent:

@@ -9,6 +9,8 @@ from tomo.tools import get_tools, rank_texts
 
 
 def test_system_prompt_requires_fenced_markdown_artifacts():
+    assert "Default to conversational plain text replies" in SYSTEM_PROMPT
+    assert "unless the user explicitly asks for Markdown" in SYSTEM_PROMPT
     assert "output that artifact literally inside a fenced code block" in SYSTEM_PROMPT
     assert "Do not emit raw markdown tables" in SYSTEM_PROMPT
     assert "wrap the entire artifact in one fenced code block" in SYSTEM_PROMPT
