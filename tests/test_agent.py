@@ -44,7 +44,8 @@ def test_browser_tool_skill_exists_in_local_skill_folder():
     assert skill.exists()
     content = skill.read_text(encoding="utf-8")
     assert "name: browser-tool" in content
-    assert "Use Tomo's browser tool reliably" in content
+    assert "agent-browser" in content
+    assert "snapshot" in content
     assert "Do not screenshot `about:blank`" in content
 
 
@@ -126,8 +127,9 @@ def test_extract_text_does_not_render_empty_internal_state():
 
 
 def test_system_prompt_mentions_browser_for_web_dev_tasks():
-    assert "- browser: use a real headless Chromium browser" in SYSTEM_PROMPT
-    assert "For web UI/dev tasks, use browser" in SYSTEM_PROMPT
+    assert "- browser: use agent-browser (headless Chromium)" in SYSTEM_PROMPT
+    assert "Prefer snapshot to get @eN refs" in SYSTEM_PROMPT
+    assert "use browser to navigate, snapshot" in SYSTEM_PROMPT
 
 
 def test_terminal_runs_from_workspace_by_default(tmp_path, monkeypatch):
