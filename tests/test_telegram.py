@@ -7,6 +7,7 @@ import time
 
 from tomo.gateway import AgentTrace, GatewayReply, ToolCallLifecycleEvent
 from tomo.config import settings
+from tomo.control_approval_store import ControlApprovalStore
 from tomo.slash_commands import command_argument
 from tomo.telegram import (
     TelegramGateway,
@@ -90,6 +91,13 @@ class FakeTelegram(TelegramGateway):
             self.sent.append((str(payload["chat_id"]), str(payload["text"])))
             return {"ok": True, "result": True}
         return {"ok": True, "result": []}
+
+
+def wait_for_pending_approval(gateway: TelegramGateway, chat_id: str) -> None:
+    deadline = time.monotonic() + 1
+    while chat_id not in gateway.pending_approvals and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert chat_id in gateway.pending_approvals
 
 
 class ImageTelegram(FakeTelegram):
@@ -870,13 +878,39 @@ def test_telegram_gateway_approval_waits_for_chat_reply():
 
     thread = threading.Thread(target=lambda: result.setdefault("approved", gateway.request_approval("123", request)), daemon=True)
     thread.start()
-    assert "123" in gateway.pending_approvals
+    wait_for_pending_approval(gateway, "123")
 
     gateway.handle_text("123", "/approve")
     thread.join(timeout=1)
 
     assert result["approved"] is True
     assert ("123", "Approved.") in gateway.sent
+
+
+def test_telegram_gateway_approval_is_visible_to_control_store(tmp_path, monkeypatch):
+    import tomo.control_approval_store as approval_store_module
+
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    store = ControlApprovalStore(storage_path=tmp_path / "control_approvals.json")
+    monkeypatch.setattr(approval_store_module, "_store", store)
+    gateway = FakeTelegram()
+    request = type("Request", (), {"operation": "social_browser", "target": "tool call", "reason": "publish post"})()
+
+    thread = threading.Thread(target=lambda: gateway.request_approval("123", request), daemon=True)
+    thread.start()
+    deadline = time.monotonic() + 1
+    while not store.list_pending() and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    pending = store.list_pending()
+    assert len(pending) == 1
+    assert pending[0].operation == "social_browser"
+    assert pending[0].channel_id == "123"
+
+    store.resolve(pending[0].id, True)
+    thread.join(timeout=1)
+    assert not thread.is_alive()
+    assert store.list_pending() == []
 
 
 def test_telegram_gateway_approval_accepts_bot_qualified_command():
@@ -886,7 +920,7 @@ def test_telegram_gateway_approval_accepts_bot_qualified_command():
 
     thread = threading.Thread(target=lambda: result.setdefault("approved", gateway.request_approval("123", request)), daemon=True)
     thread.start()
-    assert "123" in gateway.pending_approvals
+    wait_for_pending_approval(gateway, "123")
 
     gateway.handle_text("123", "/approve@tomo_bot")
     thread.join(timeout=1)
@@ -964,7 +998,7 @@ def test_telegram_gateway_yolo_enable_approves_pending_request():
 
     thread = threading.Thread(target=lambda: result.setdefault("approved", gateway.request_approval("123", request)), daemon=True)
     thread.start()
-    assert "123" in gateway.pending_approvals
+    wait_for_pending_approval(gateway, "123")
 
     gateway.handle_text("123", "/yolo enable")
     thread.join(timeout=1)
@@ -980,7 +1014,7 @@ def test_telegram_gateway_does_not_start_new_task_during_pending_approval():
 
     thread = threading.Thread(target=lambda: gateway.request_approval("123", request), daemon=True)
     thread.start()
-    assert "123" in gateway.pending_approvals
+    wait_for_pending_approval(gateway, "123")
 
     gateway.handle_text("123", "wassup?")
 

@@ -6,7 +6,7 @@ import { useState } from "react";
 import { importMemoriesAction } from "@/lib/api/actions";
 import { controlApiConfigured } from "@/lib/api/config";
 
-const ACCEPTED = [".pdf", ".txt", ".md", ".markdown", ".json"];
+const ACCEPTED = [".txt", ".md", ".markdown", ".json"];
 
 type ImportRow = {
   name: string;

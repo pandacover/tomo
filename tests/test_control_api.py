@@ -106,12 +106,10 @@ def test_scheduled_tasks_and_cancel(client, tmp_path, monkeypatch):
 
 def test_approvals_list_and_resolve(client, tmp_path, monkeypatch):
     store_path = tmp_path / ".tomo" / "control_approvals.json"
-    shared_store = ControlApprovalStore(storage_path=store_path)
-    monkeypatch.setattr(
-        "tomo.control_api.get_control_approval_store",
-        lambda: shared_store,
-    )
-    store = shared_store
+    import tomo.control_approval_store as approval_store_module
+
+    store = ControlApprovalStore(storage_path=store_path)
+    monkeypatch.setattr(approval_store_module, "_store", store)
     approval_id = store.create(
         "desktop:local",
         ApprovalRequest(operation="terminal", target="uv run pytest", reason="Run tests"),

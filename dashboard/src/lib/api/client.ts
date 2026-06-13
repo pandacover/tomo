@@ -4,6 +4,13 @@ import {
   resolveControlApiUrl,
 } from "@/lib/api/config";
 import { controlApiRoutes } from "@/lib/api/contract";
+import {
+  approvalsResponseSchema,
+  integrationsResponseSchema,
+  memoriesResponseSchema,
+  overviewStatsSchema,
+  scheduledTasksResponseSchema,
+} from "@/lib/api/schemas";
 import type { PendingApproval } from "@/domain/approval";
 import type { Integration } from "@/domain/integration";
 import type { MemoryEntry } from "@/domain/memory";
@@ -32,32 +39,26 @@ async function controlFetch<T>(path: string): Promise<T> {
 }
 
 export async function fetchOverviewFromApi(): Promise<OverviewStats> {
-  const data = await controlFetch<OverviewStats>(controlApiRoutes.overview);
-  return data;
+  const data = await controlFetch<unknown>(controlApiRoutes.overview);
+  return overviewStatsSchema.parse(data);
 }
 
 export async function fetchMemoriesFromApi(): Promise<MemoryEntry[]> {
-  const data = await controlFetch<{ entries: MemoryEntry[] }>(controlApiRoutes.memories);
+  const data = memoriesResponseSchema.parse(await controlFetch<unknown>(controlApiRoutes.memories));
   return data.entries;
 }
 
 export async function fetchIntegrationsFromApi(): Promise<Integration[]> {
-  const data = await controlFetch<{ integrations: Integration[] }>(
-    controlApiRoutes.integrations,
-  );
+  const data = integrationsResponseSchema.parse(await controlFetch<unknown>(controlApiRoutes.integrations));
   return data.integrations;
 }
 
 export async function fetchScheduledTasksFromApi(): Promise<ScheduledTask[]> {
-  const data = await controlFetch<{ tasks: ScheduledTask[] }>(
-    controlApiRoutes.scheduledTasks,
-  );
+  const data = scheduledTasksResponseSchema.parse(await controlFetch<unknown>(controlApiRoutes.scheduledTasks));
   return data.tasks;
 }
 
 export async function fetchApprovalsFromApi(): Promise<PendingApproval[]> {
-  const data = await controlFetch<{ approvals: PendingApproval[] }>(
-    controlApiRoutes.approvals,
-  );
+  const data = approvalsResponseSchema.parse(await controlFetch<unknown>(controlApiRoutes.approvals));
   return data.approvals;
 }

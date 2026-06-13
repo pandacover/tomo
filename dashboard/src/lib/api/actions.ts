@@ -1,5 +1,9 @@
 import { controlApiAuthHeaders, resolveControlApiUrl } from "@/lib/api/config";
 import { controlApiRoutes } from "@/lib/api/contract";
+import {
+  importMemoryResponseSchema,
+  scheduledTaskResponseSchema,
+} from "@/lib/api/schemas";
 import type { MemoryEntry } from "@/domain/memory";
 import type { ScheduledTask } from "@/domain/scheduled-task";
 
@@ -70,22 +74,23 @@ export async function importMemoriesAction(
   for (const file of files) {
     form.append("files", file);
   }
-  return controlRequest(controlApiRoutes.memoriesImport, {
+  const payload = await controlRequest<unknown>(controlApiRoutes.memoriesImport, {
     method: "POST",
     body: form,
   });
+  return importMemoryResponseSchema.parse(payload);
 }
 
 export async function patchScheduledTaskAction(
   taskId: string,
   body: { enabled?: boolean; status?: ScheduledTask["status"] },
 ): Promise<ScheduledTask> {
-  const payload = await controlRequest<{ task: ScheduledTask }>(
+  const payload = await controlRequest<unknown>(
     `${controlApiRoutes.scheduledTasks}/${taskId}`,
     {
       method: "PATCH",
       body: JSON.stringify(body),
     },
   );
-  return payload.task;
+  return scheduledTaskResponseSchema.parse(payload).task;
 }
