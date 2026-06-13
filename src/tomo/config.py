@@ -15,6 +15,10 @@ class Settings(BaseSettings):
     telegram_allowed_chat_ids: str | None = None
     show_reasoning_summary: bool = False
     reasoning_effort: Literal["low", "medium", "high"] = "medium"
+    control_api_host: str = "127.0.0.1"
+    control_api_port: int = 8787
+    control_api_key: str | None = None
+    control_cors_origins: str = "http://localhost:3000"
 
 
 settings = Settings()

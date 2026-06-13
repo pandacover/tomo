@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Tomo Control Memory Console</title>
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <div class="shell">
+      <input class="drawer-toggle" id="nav-drawer" type="checkbox">
+      <label class="drawer-trigger" for="nav-drawer" aria-label="Open navigation"></label>
+      <label class="drawer-scrim" for="nav-drawer" aria-label="Close navigation"></label>
+      <aside class="rail">
+        <div class="drawer-profile">
+          <p class="drawer-user">luv makin</p>
+          <div class="drawer-user-id">user_8f42c1</div>
+        </div>
+        <section class="drawer-section">
+          <h2 class="drawer-section-title">setting</h2>
+          <nav class="drawer-list">
+            <a href="#">profile</a>
+            <a href="editor.html">import memory</a>
+          </nav>
+        </section>
+        <section class="drawer-section">
+          <h2 class="drawer-section-title">account</h2>
+          <nav class="drawer-list">
+            <a href="#">privacy</a>
+          </nav>
+        </section>
+      </aside>
+      <main class="main">
+        <section class="topbar">
+          <div>
+            <h1 class="compact-wordmark">tomo</h1>
+          </div>
+        </section>
+
+        <section class="grid cols-3">
+          <a class="stat" href="memories.html">
+            <span class="label">Memories</span>
+            <span class="stat-value">128</span>
+            <div class="status-row"><span class="dot"></span><span class="meta">14 updated this week</span></div>
+          </a>
+          <a class="stat" href="plugins.html">
+            <span class="label">Plug-ins</span>
+            <span class="stat-value">17</span>
+            <div class="status-row"><span class="dot cyan"></span><span class="meta">3 require review</span></div>
+          </a>
+          <a class="stat" href="automations.html">
+            <span class="label">Automations</span>
+            <span class="stat-value">31</span>
+            <div class="status-row"><span class="dot amber"></span><span class="meta">6 gated by approval</span></div>
+          </a>
+        </section>
+
+        <section style="margin-top: 16px;">
+          <article class="panel">
+            <div class="section-head">
+              <div>
+                <h2>Approval Queue</h2>
+                <p class="meta">Changes that need a human decision before Tomo can apply them.</p>
+              </div>
+              <a class="button" href="automations.html">View all</a>
+            </div>
+            <div class="list">
+              <div class="record approval-record">
+                <div>
+                  <p>Automation can open a shared browser, but risky actions still need a clear approval rule.</p>
+                </div>
+                <div class="actions">
+                  <a class="button" href="editor.html">Inspect</a>
+                  <button class="button primary">Approve</button>
+                </div>
+              </div>
+              <div class="record approval-record">
+                <div>
+                  <p>One stale note still mentions profile persistence. Mark it stale before publishing dependent automations.</p>
+                </div>
+                <div class="actions">
+                  <a class="button" href="editor.html">Inspect</a>
+                  <button class="button primary">Approve</button>
+                </div>
+              </div>
+              <div class="record approval-record">
+                <div>
+                  <p>Network and browser permissions changed. Confirm the new scope before enabling automation access.</p>
+                </div>
+                <div class="actions">
+                  <a class="button" href="editor.html">Inspect</a>
+                  <button class="button primary">Approve</button>
+                </div>
+              </div>
+            </div>
+          </article>
+        </section>
+      </main>
+    </div>
+  </body>
+</html>

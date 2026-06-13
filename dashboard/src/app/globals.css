@@ -1,0 +1,6 @@
+@import "../styles/tomo-prototype.css";
+
+.dropzone-active {
+  border-color: rgba(var(--accent-rgb), 0.42);
+  background: rgba(var(--accent-rgb), 0.06);
+}

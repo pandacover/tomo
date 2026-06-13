@@ -58,10 +58,14 @@ class DesktopApprovalResponder:
         self._lock = threading.Lock()
 
     def request_approval(self, channel_id: str, request: ApprovalRequest) -> bool:
+        from .control_approval_store import get_control_approval_store
+
+        store = get_control_approval_store()
         approval_id = str(uuid4())
         answers: queue.Queue[bool] = queue.Queue(maxsize=1)
         with self._lock:
             self._pending[approval_id] = answers
+        store.create(channel_id, request, approval_id=approval_id)
         self.emit(
             {
                 "type": "approval_request",
@@ -72,17 +76,30 @@ class DesktopApprovalResponder:
             }
         )
         try:
-            return answers.get()
+            while True:
+                try:
+                    return answers.get(timeout=0.1)
+                except queue.Empty:
+                    resolved = store.get_resolution(approval_id)
+                    if resolved is not None:
+                        return resolved
         finally:
             with self._lock:
                 self._pending.pop(approval_id, None)
+            store.clear_resolution(approval_id)
 
     def resolve(self, approval_id: str, approved: bool) -> bool:
+        from .control_approval_store import get_control_approval_store
+
+        store = get_control_approval_store()
         with self._lock:
             answers = self._pending.get(approval_id)
         if answers is None:
-            return False
-        answers.put(bool(approved))
+            if not store.resolve(approval_id, approved):
+                return False
+        else:
+            store.resolve(approval_id, approved)
+            answers.put(bool(approved))
         self.emit(
             {"type": "approval_resolved", "id": approval_id, "approved": bool(approved)}
         )

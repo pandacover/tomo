@@ -51,6 +51,30 @@ and `TOMO_TELEGRAM_ALLOWED_CHAT_IDS` still work as environment variable override
 When Tomo needs approval for a terminal command, reply `/approve` or `/deny` in Telegram.
 The background gateway writes its PID to `.tomo/telegram.pid` and logs to `.tomo/telegram.log`.
 
+## Control API
+
+Run the dashboard Control API (serves memories, integrations, scheduled tasks, and approvals):
+
+```bash
+uv run tomo control-api start
+uv run tomo control-api stop
+uv run tomo control-api restart
+```
+
+`uv run tomo control-api` runs the server in the foreground for debugging. Default listen address is `http://127.0.0.1:8787`.
+
+Set optional env vars:
+
+- `TOMO_CONTROL_API_KEY` — require `Authorization: Bearer <key>` on protected routes
+- `TOMO_CONTROL_CORS_ORIGINS` — comma-separated dashboard origins (default `http://localhost:3000`)
+
+Point the dashboard at the API:
+
+```bash
+cd dashboard
+NEXT_PUBLIC_CONTROL_API_URL=http://127.0.0.1:8787 bun run dev
+```
+
 ## Commands
 
 ```bash
@@ -68,6 +92,9 @@ uv run tomo telegram restart
 uv run tomo telegram-config set --bot-token 123456:telegram-token --chat-ids 123456789
 uv run tomo telegram-config show
 uv run tomo telegram-config delete
+uv run tomo control-api start
+uv run tomo control-api stop
+uv run tomo control-api restart
 ```
 
 Local OAuth tokens are stored in `.tomo/auth.json` and ignored by git.
