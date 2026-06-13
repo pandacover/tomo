@@ -13,6 +13,7 @@ from base64 import b64decode, b64encode
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from uuid import uuid4
 
 import httpx
 
@@ -48,6 +49,7 @@ DEFAULT_LOCATION_WATCH_RADIUS_METERS = 500.0
 @dataclass
 class PendingTelegramApproval:
     request: ApprovalRequest
+    approval_id: str
     answers: queue.Queue[bool] = field(default_factory=queue.Queue)
 
 
@@ -475,26 +477,43 @@ class TelegramGateway:
                 next_notice_at += TELEGRAM_STILL_WORKING_INTERVAL_SECONDS
 
     def request_approval(self, channel_id: str, request: ApprovalRequest) -> bool:
+        from .control_approval_store import get_control_approval_store
+
         if channel_id in self.yolo_chats:
             return True
-        pending = PendingTelegramApproval(request=request)
+        store = get_control_approval_store()
+        approval_id = str(uuid4())
+        store.create(channel_id, request, approval_id=approval_id)
+        pending = PendingTelegramApproval(request=request, approval_id=approval_id)
         self.pending_approvals[channel_id] = pending
         self.send_message(
             channel_id,
             f"Approval required for {request.operation} {request.target}\n\n{request.reason}\n\nReply /approve or /deny.",
         )
         try:
-            return pending.answers.get()
+            while True:
+                try:
+                    return pending.answers.get(timeout=0.1)
+                except queue.Empty:
+                    resolved = store.get_resolution(approval_id)
+                    if resolved is not None:
+                        return resolved
         finally:
             self.pending_approvals.pop(channel_id, None)
+            store.clear_resolution(approval_id)
 
     def resolve_approval(self, chat_id: str, text: str, pending: PendingTelegramApproval) -> None:
+        from .control_approval_store import get_control_approval_store
+
+        store = get_control_approval_store()
         answer = text.strip().lower()
         if answer in APPROVE_WORDS:
+            store.resolve(pending.approval_id, True)
             pending.answers.put(True)
             self.send_message(chat_id, "Approved.")
             return
         if answer in DENY_WORDS:
+            store.resolve(pending.approval_id, False)
             pending.answers.put(False)
             self.send_message(chat_id, "Denied.")
             return
@@ -512,6 +531,9 @@ class TelegramGateway:
             self.yolo_chats.add(chat_id)
             pending = self.pending_approvals.get(chat_id)
             if pending is not None:
+                from .control_approval_store import get_control_approval_store
+
+                get_control_approval_store().resolve(pending.approval_id, True)
                 pending.answers.put(True)
                 self.send_message(chat_id, f"{YOLO_ENABLED_MESSAGE} Approved pending tool call.")
                 return

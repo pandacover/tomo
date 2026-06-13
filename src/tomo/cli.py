@@ -14,6 +14,7 @@ from .telegram_config import (
 from .token_store import delete_tokens, ensure_logged_in, load_tokens
 from .telegram import restart_telegram, start_telegram, stop_telegram
 from .tui import run_chat
+from .control_api import restart_control_api, run_control_api, start_control_api, stop_control_api
 from .desktop import restart_desktop, run_desktop, start_desktop, stop_desktop
 
 
@@ -45,6 +46,11 @@ def main() -> None:
     )
     telegram_config_subparsers.add_parser("show", help="Show saved Telegram gateway config")
     telegram_config_subparsers.add_parser("delete", help="Delete saved Telegram gateway config")
+    control_api_parser = subparsers.add_parser("control-api", help="Manage the dashboard Control API")
+    control_api_subparsers = control_api_parser.add_subparsers(dest="control_api_command")
+    control_api_subparsers.add_parser("start", help="Start the Control API in the background")
+    control_api_subparsers.add_parser("stop", help="Stop the background Control API")
+    control_api_subparsers.add_parser("restart", help="Restart the background Control API")
     args = parser.parse_args()
 
     match args.command:
@@ -64,6 +70,8 @@ def main() -> None:
             telegram(args)
         case "telegram-config":
             telegram_config(args)
+        case "control-api":
+            control_api_command(args)
         case _:
             parser.print_help()
 
@@ -127,6 +135,20 @@ def telegram_config(args: argparse.Namespace) -> None:
             print("Telegram config deleted.")
         case _:
             print("Choose a telegram-config command: set, show, or delete.")
+
+
+def control_api_command(args: argparse.Namespace) -> None:
+    match args.control_api_command:
+        case "start":
+            start_control_api()
+        case "stop":
+            stop_control_api()
+        case "restart":
+            restart_control_api()
+        case None:
+            run_control_api()
+        case _:
+            print("Choose a control-api command: start, stop, or restart.")
 
 
 def telegram(args: argparse.Namespace) -> None:
