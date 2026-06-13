@@ -80,6 +80,19 @@ def fake_terminal(command: str) -> str:
     return "Exit code: 0\nok"
 
 
+@tool("social_browser")
+def fake_social_browser(
+    platform: str,
+    action: str,
+    url: str | None = None,
+    query: str | None = None,
+    text: str | None = None,
+    reply_to_url: str | None = None,
+) -> str:
+    """Fake social browser."""
+    return f"{platform}:{action}:{url}:{query}:{text}:{reply_to_url}"
+
+
 @tool("edit_file")
 def fake_edit_file(path: str, old_text: str, new_text: str) -> str:
     """Fake edit."""
@@ -105,6 +118,8 @@ def test_local_code_question_forces_files_search_before_final_answer():
 def test_langgraph_system_prompt_points_browser_work_to_local_skill():
     assert "skills/browser-tool/SKILL.md" in LANGGRAPH_SYSTEM_PROMPT
     assert "Before using the browser tool" in LANGGRAPH_SYSTEM_PROMPT
+    assert "skills/social-browser/SKILL.md" in LANGGRAPH_SYSTEM_PROMPT
+    assert "skills/gen-z-phrasing/COMMON_PHRASES.md" in LANGGRAPH_SYSTEM_PROMPT
 
 
 def test_langgraph_model_receives_browser_skill_instruction():
@@ -115,6 +130,7 @@ def test_langgraph_model_receives_browser_skill_instruction():
 
     assert model.messages is not None
     assert "skills/browser-tool/SKILL.md" in model.messages[0].content
+    assert "skills/gen-z-phrasing/COMMON_PHRASES.md" in model.messages[0].content
 
 
 def test_current_docs_question_forces_web_search_path():
@@ -194,6 +210,65 @@ def test_terminal_call_triggers_interrupt_and_resume_executes_tool():
 
     assert "terminal" in [getattr(message, "name", None) for message in result["messages"]]
     assert result["messages"][-1].content == "validated"
+
+
+def test_social_browser_read_action_does_not_require_approval():
+    model = FakeModel(
+        [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "id": "call-1",
+                        "name": "social_browser",
+                        "args": {"platform": "x", "action": "status"},
+                    }
+                ],
+            ),
+            AIMessage(content="checked"),
+        ]
+    )
+    agent = make_langgraph_agent(model=model, tools=[fake_social_browser])
+
+    result = agent.invoke({"messages": [HumanMessage(content="check x status")]}, config=config())
+
+    assert "__interrupt__" not in result
+    assert "social_browser" in [getattr(message, "name", None) for message in result["messages"]]
+    assert result["messages"][-1].content == "checked"
+
+
+def test_social_browser_publish_action_requires_approval_with_details():
+    model = FakeModel(
+        [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "id": "call-1",
+                        "name": "social_browser",
+                        "args": {"platform": "x", "action": "publish_post", "text": "hello x"},
+                    }
+                ],
+            ),
+            AIMessage(content="published"),
+        ]
+    )
+    agent = make_langgraph_agent(model=model, tools=[fake_social_browser])
+    cfg = config()
+
+    interrupted = agent.invoke({"messages": [HumanMessage(content="publish this on x")]}, config=cfg)
+
+    assert "__interrupt__" in interrupted
+    action = interrupted["__interrupt__"][0].value["action_requests"][0]
+    assert action["name"] == "social_browser"
+    assert "Platform: x" in action["description"]
+    assert "Action: publish_post" in action["description"]
+    assert "Text: hello x" in action["description"]
+
+    result = agent.invoke(Command(resume={"decisions": [{"type": "approve"}]}), config=cfg)
+
+    assert "social_browser" in [getattr(message, "name", None) for message in result["messages"]]
+    assert result["messages"][-1].content == "published"
 
 
 def test_rejected_approval_prevents_success_claim_and_repairs():

@@ -18,6 +18,7 @@ from .file_tools import edit_file, glob, read_file, write_file
 from .gateway import extract_tool_errors, get_message_tool_content, get_message_tool_name, get_tool_calls, rectification_prompt, unresolved_failure_reply
 from .model import make_model
 from .cross_gateway_bridge import make_cross_gateway_tool
+from .social_browser import social_browser
 from .tools import append_memory, files_search, generate_image, read_memory, terminal, web_fetch, web_search
 
 
@@ -36,6 +37,7 @@ class TomoGraphState(TypedDict):
 
 
 APPROVAL_REQUIRED_TOOLS = frozenset({"terminal", "write_file", "edit_file", "schedule_task"})
+SOCIAL_APPROVAL_REQUIRED_ACTIONS = frozenset({"login_start", "connect_chrome", "publish_post", "publish_reply", "logout"})
 DISCOURAGED_TOOLS = frozenset({"grep", "ls", "execute"})
 MAX_REPAIR_ATTEMPTS = 2
 LANGGRAPH_SYSTEM_PROMPT = (
@@ -43,6 +45,10 @@ LANGGRAPH_SYSTEM_PROMPT = (
     + "\n\nLangGraph skill use:\n"
     "- Before using the browser tool for screenshots, snapshots, rendered UI validation, local dev server checks, or page text extraction, "
     "read `skills/browser-tool/SKILL.md` with `read_file` when available and follow the snapshot-and-ref workflow.\n"
+    "- Before using `social_browser` for logged-in X access, read `skills/social-browser/SKILL.md` with `read_file` when available. "
+    "Use `social_browser` rather than the generic browser for logged-in social accounts.\n"
+    "- Before writing or rewriting Gen Z, slang-heavy, meme-aware, or youth-audience copy, read "
+    "`skills/gen-z-phrasing/COMMON_PHRASES.md` with `read_file` when available and follow its usage guidance.\n"
 )
 
 
@@ -120,7 +126,11 @@ def make_langgraph_agent(*, reasoning_effort: str | None = None, model: object |
             if edit_without_read:
                 lines.append("Read the target file with `read_file` before calling `edit_file`.")
             return {"messages": [HumanMessage(content="\n".join(lines), name="tomo_orchestrator")]}
-        pending = [call for call in calls if str(call.get("name")) in APPROVAL_REQUIRED_TOOLS and str(call.get("id")) not in state.get("approved_tool_call_ids", [])]
+        pending = [
+            call
+            for call in calls
+            if tool_call_requires_approval(call) and str(call.get("id")) not in state.get("approved_tool_call_ids", [])
+        ]
         if pending:
             return {"pending_approval_calls": pending}
         return None
@@ -133,7 +143,7 @@ def make_langgraph_agent(*, reasoning_effort: str | None = None, model: object |
             {
                 "name": str(call.get("name") or "tool"),
                 "args": call.get("input") or {},
-                "description": f"Tool execution requires approval: {call.get('name')}",
+                "description": approval_description(call),
             }
             for call in pending
         ]
@@ -245,6 +255,7 @@ def default_langgraph_tools() -> list[BaseTool]:
         glob,
         terminal,
         browser,
+        social_browser,
         web_search,
         web_fetch,
         generate_image,
@@ -254,6 +265,53 @@ def default_langgraph_tools() -> list[BaseTool]:
         write_file,
         edit_file,
     ]
+
+
+def tool_call_requires_approval(call: Mapping[str, object]) -> bool:
+    name = str(call.get("name") or "")
+    if name in APPROVAL_REQUIRED_TOOLS:
+        return True
+    if name != "social_browser":
+        return False
+    args = parse_call_input(call.get("input"))
+    action = str(args.get("action") or "")
+    return action in SOCIAL_APPROVAL_REQUIRED_ACTIONS
+
+
+def approval_description(call: Mapping[str, object]) -> str:
+    name = str(call.get("name") or "tool")
+    if name != "social_browser":
+        return f"Tool execution requires approval: {name}"
+    args = parse_call_input(call.get("input"))
+    platform = str(args.get("platform") or "x")
+    action = str(args.get("action") or "")
+    url = str(args.get("url") or args.get("reply_to_url") or "").strip()
+    text = str(args.get("text") or "").strip()
+    lines = [
+        "Logged-in social account action requires approval.",
+        f"Platform: {platform}",
+        f"Action: {action}",
+        "This uses the logged-in X account in Tomo's managed browser profile.",
+    ]
+    if url:
+        lines.append(f"Target URL: {url}")
+    if text:
+        lines.append(f"Text: {text}")
+    return "\n".join(lines)
+
+
+def parse_call_input(value: object) -> Mapping[str, object]:
+    if isinstance(value, Mapping):
+        return value
+    if isinstance(value, str):
+        import json
+
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, Mapping) else {}
+    return {}
 
 
 def after_model(state: TomoGraphState) -> str:

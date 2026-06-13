@@ -129,12 +129,35 @@ def operation_timeout_s(timeout_ms: int, *, minimum: float = DEFAULT_SUBPROCESS_
     return max(minimum, timeout_ms / 1000)
 
 
-def build_agent_browser_command(*args: str, json_output: bool = False) -> list[str]:
-    command = [*resolve_agent_browser_command(), "--session", current_session_name()]
+def build_agent_browser_command_for_session(
+    session: str,
+    *args: str,
+    profile: Path | None = None,
+    headed: bool = False,
+    auto_connect: bool = False,
+    cdp_port: int | None = None,
+    allowed_domains: tuple[str, ...] = (),
+    json_output: bool = False,
+) -> list[str]:
+    command = [*resolve_agent_browser_command(), "--session", session]
+    if profile is not None:
+        command.extend(["--profile", str(profile)])
+    if headed:
+        command.append("--headed")
+    if auto_connect:
+        command.append("--auto-connect")
+    if cdp_port is not None:
+        command.extend(["--cdp", str(cdp_port)])
+    if allowed_domains:
+        command.extend(["--allowed-domains", ",".join(allowed_domains)])
     if json_output:
         command.append("--json")
     command.extend(args)
     return command
+
+
+def build_agent_browser_command(*args: str, json_output: bool = False) -> list[str]:
+    return build_agent_browser_command_for_session(current_session_name(), *args, json_output=json_output)
 
 
 def _read_text(path: Path) -> str:
@@ -196,6 +219,40 @@ def run_agent_browser(
     check: bool = True,
 ) -> AgentBrowserResult:
     command = build_agent_browser_command(*args, json_output=json_output)
+    return run_agent_browser_command(command, timeout_s=timeout_s, check=check)
+
+
+def run_agent_browser_for_session(
+    session: str,
+    *args: str,
+    profile: Path | None = None,
+    headed: bool = False,
+    auto_connect: bool = False,
+    cdp_port: int | None = None,
+    allowed_domains: tuple[str, ...] = (),
+    timeout_s: float | None = None,
+    json_output: bool = False,
+    check: bool = True,
+) -> AgentBrowserResult:
+    command = build_agent_browser_command_for_session(
+        session,
+        *args,
+        profile=profile,
+        headed=headed,
+        auto_connect=auto_connect,
+        cdp_port=cdp_port,
+        allowed_domains=allowed_domains,
+        json_output=json_output,
+    )
+    return run_agent_browser_command(command, timeout_s=timeout_s, check=check)
+
+
+def run_agent_browser_command(
+    command: list[str],
+    *,
+    timeout_s: float | None = None,
+    check: bool = True,
+) -> AgentBrowserResult:
     effective_timeout = timeout_s if timeout_s is not None else DEFAULT_SUBPROCESS_TIMEOUT_S
 
     try:

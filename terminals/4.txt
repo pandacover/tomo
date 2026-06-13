@@ -1,7 +1,0 @@
----
-pid: 33768
-cwd: "C:\Users\luvma\OneDrive\Desktop\zero_labs\tomo"
-command: "uv run python -c \"from tomo.browser_tools import browser; print(browser.invoke({'action':'navigate','url':'http://localhost:5173','timeout_ms':60000}))\""
-started_at: 2026-06-11T20:57:46.483Z
-running_for_ms: 5745004  
----

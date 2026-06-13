@@ -1,7 +1,0 @@
----
-pid: 37452
-cwd: "C:\Users\luvma\OneDrive\Desktop\zero_labs\tomo"
-command: "$exe = \"C:\\Users\\luvma\\OneDrive\\Desktop\\zero_labs\\tomo\\node_modules\\agent-browser\\bin\\agent-browser-win32-x64.exe\"; Measure-Command { & $exe --session ps-test open http://localhost:5173 } | Select-Object TotalSeconds"
-started_at: 2026-06-11T21:02:14.140Z
-running_for_ms: 5510001  
----

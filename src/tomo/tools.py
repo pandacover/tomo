@@ -19,6 +19,7 @@ from langchain_core.tools import tool
 from rank_bm25 import BM25Okapi
 
 from .browser_tools import browser
+from .social_browser import social_browser
 from .scheduler import get_scheduler
 
 
@@ -55,7 +56,21 @@ def set_approval_handler(handler: ApprovalHandler | None) -> None:
 
 
 def get_tools():
-    return [files_search, terminal, browser, web_search, web_fetch, generate_image, append_memory, read_memory, schedule_reminder, schedule_action, list_scheduled_tasks, cancel_scheduled_task]
+    return [
+        files_search,
+        terminal,
+        browser,
+        social_browser,
+        web_search,
+        web_fetch,
+        generate_image,
+        append_memory,
+        read_memory,
+        schedule_reminder,
+        schedule_action,
+        list_scheduled_tasks,
+        cancel_scheduled_task,
+    ]
 
 
 @tool("generate_image")

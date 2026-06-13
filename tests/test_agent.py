@@ -57,12 +57,16 @@ def test_project_tools_include_primitive_file_tools_and_search():
         "files_search",
         "terminal",
         "browser",
+        "social_browser",
         "web_search",
         "web_fetch",
         "generate_image",
         "append_memory",
         "read_memory",
-        "schedule_task",
+        "schedule_reminder",
+        "schedule_action",
+        "list_scheduled_tasks",
+        "cancel_scheduled_task",
     }
 
 
@@ -132,6 +136,12 @@ def test_system_prompt_mentions_browser_for_web_dev_tasks():
     assert "- browser: use agent-browser (headless Chromium)" in SYSTEM_PROMPT
     assert "Prefer snapshot to get @eN refs" in SYSTEM_PROMPT
     assert "use browser to navigate, snapshot" in SYSTEM_PROMPT
+
+
+def test_system_prompt_mentions_social_browser_for_logged_in_x():
+    assert "- social_browser: use Tomo's managed X browser bridge" in SYSTEM_PROMPT
+    assert "real Chrome incognito login window" in SYSTEM_PROMPT
+    assert "Never ask for social account passwords" in SYSTEM_PROMPT
 
 
 def test_terminal_runs_from_workspace_by_default(tmp_path, monkeypatch):

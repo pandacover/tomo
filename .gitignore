@@ -9,3 +9,6 @@ package-lock.json
 __pycache__/
 *.py[cod]
 .python-version
+terminals/
+localhost-5173*.png
+agent-tools/
