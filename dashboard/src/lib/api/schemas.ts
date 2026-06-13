@@ -10,7 +10,18 @@ export const memoryEntrySchema = z.object({
   updatedLabel: z.string(),
 });
 
-export const integrationSchema = z.object({
+export const connectionSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  category: z.enum(["chat", "app", "social", "custom"]),
+  description: z.string(),
+  status: z.enum(["connected", "available", "needs_setup", "disabled", "unknown"]),
+  enabled: z.boolean(),
+  reviewRequired: z.boolean().optional(),
+  metadata: z.record(z.string(), z.union([z.string(), z.number(), z.boolean(), z.null()])).optional(),
+});
+
+export const legacyIntegrationSchema = z.object({
   id: z.string(),
   name: z.string(),
   kind: z.enum(["skill", "tool", "gateway"]),
@@ -31,52 +42,55 @@ export const scheduledTaskSchema = z.object({
   requiresApproval: z.boolean().optional(),
 });
 
-export const pendingApprovalSchema = z.object({
+export const sessionSummarySchema = z.object({
   id: z.string(),
-  operation: z.string(),
-  target: z.string(),
-  reason: z.string(),
-  channelId: z.string().optional().nullable(),
-}).transform((approval) => ({
-  ...approval,
-  channelId: approval.channelId ?? undefined,
-}));
-
-export const overviewStatsSchema = z.object({
-  memoryCount: z.number(),
-  memoriesUpdatedThisWeek: z.number(),
-  integrationCount: z.number(),
-  integrationsNeedingReview: z.number(),
-  scheduledTaskCount: z.number(),
-  scheduledTasksGated: z.number(),
-  pendingApprovalCount: z.number().optional(),
-  toolCount: z.number().optional(),
-  skillCount: z.number().optional(),
-  gatewayCount: z.number().optional(),
-  gatewaysNeedingReview: z.number().optional(),
+  name: z.string(),
+  createdDate: z.string(),
+  updatedDate: z.string(),
+  messageCount: z.number(),
 });
+
+export const overviewStatsSchema = z
+  .object({
+    memoryCount: z.number(),
+    memoriesUpdatedThisWeek: z.number(),
+    connectionCount: z.number().optional(),
+    connectionsNeedingReview: z.number().optional(),
+    sessionCount: z.number().optional(),
+    integrationCount: z.number().optional(),
+    integrationsNeedingReview: z.number().optional(),
+    scheduledTaskCount: z.number(),
+  })
+  .transform((stats) => ({
+    memoryCount: stats.memoryCount,
+    memoriesUpdatedThisWeek: stats.memoriesUpdatedThisWeek,
+    sessionCount: stats.sessionCount ?? 0,
+    connectionCount: stats.connectionCount ?? stats.integrationCount ?? 0,
+    connectionsNeedingReview: stats.connectionsNeedingReview ?? stats.integrationsNeedingReview ?? 0,
+    scheduledTaskCount: stats.scheduledTaskCount,
+  }));
 
 export const memoriesResponseSchema = z.object({
   entries: z.array(memoryEntrySchema),
 });
 
-export const integrationsResponseSchema = z.object({
-  integrations: z.array(integrationSchema),
+export const connectionsResponseSchema = z.object({
+  connections: z.array(connectionSchema),
+});
+
+export const legacyIntegrationsResponseSchema = z.object({
+  integrations: z.array(legacyIntegrationSchema),
 });
 
 export const scheduledTasksResponseSchema = z.object({
   tasks: z.array(scheduledTaskSchema),
 });
 
-export const approvalsResponseSchema = z.object({
-  approvals: z.array(pendingApprovalSchema),
+export const sessionsResponseSchema = z.object({
+  sessions: z.array(sessionSummarySchema),
 });
 
 export const importMemoryResponseSchema = z.object({
   imported: z.number(),
   entries: z.array(memoryEntrySchema),
-});
-
-export const scheduledTaskResponseSchema = z.object({
-  task: scheduledTaskSchema,
 });

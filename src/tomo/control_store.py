@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from .control_plane.integration_adapter import IntegrationAdapter
+from .control_plane.connection_adapter import ConnectionAdapter
 from .control_plane.memory_adapter import MemoryAdapter
 from .control_plane.models import MemoryImportFile
 from .control_plane.plane import AgentControlPlane
@@ -29,7 +29,7 @@ def import_memory_texts(texts: list[str]) -> list[dict[str, Any]]:
 
 
 def list_integrations() -> list[dict[str, Any]]:
-    return [_dump(integration) for integration in IntegrationAdapter().list()]
+    return [_dump(connection) for connection in ConnectionAdapter().list()]
 
 
 def scheduled_task_to_api(task: object) -> dict[str, Any]:

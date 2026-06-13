@@ -641,25 +641,23 @@ def now_iso() -> str:
 
 @tool("append_memory")
 def append_memory(text: str) -> str:
-    """Append a timestamped durable memory to MEMORY.md. Use for user preferences, project facts, decisions, recurring context, and useful workarounds."""
+    """Append durable memory to Tomo's SQL memory store. Use for user preferences, project facts, decisions, recurring context, and useful workarounds."""
     if not text or not text.strip():
         return "Error: memory text cannot be empty"
-    line = f"[{now_iso()}] {text.strip()}\n"
-    MEMORY_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with open(MEMORY_FILE, "a", encoding="utf-8") as f:
-        f.write(line)
+    from tomo.memory_store import get_memory_repository
+
+    get_memory_repository().append(text.strip(), source="agent")
     return f"Appended memory: {text.strip()[:80]}"
 
 
 @tool("read_memory")
 def read_memory(query: str, k: int = 8) -> str:
-    """Search MEMORY.md with BM25 for relevant prior context. Use before answering when user preferences, past decisions, or project facts may matter."""
-    if not MEMORY_FILE.exists():
-        return "No memory file yet."
+    """Search Tomo's SQL memory store with BM25 for relevant prior context. Use before answering when user preferences, past decisions, or project facts may matter."""
+    from tomo.memory_store import get_memory_repository
 
-    lines = MEMORY_FILE.read_text(encoding="utf-8").strip().splitlines()
-    if not lines:
-        return "Memory file is empty."
+    records = [record for record in get_memory_repository().list() if record.disabled_at is None]
+    if not records:
+        return "Memory store is empty."
 
-    top = rank_texts(query, lines, k=k)
+    top = rank_texts(query, [f"[{record.created_at}] {record.text}" for record in records], k=k)
     return "\n".join(top) if top else "No relevant memories found."

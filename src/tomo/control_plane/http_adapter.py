@@ -19,15 +19,6 @@ class AppendMemoryBody(BaseModel):
     text: str
 
 
-class ResolveApprovalBody(BaseModel):
-    approved: bool
-
-
-class PatchScheduledTaskBody(BaseModel):
-    enabled: bool | None = None
-    status: str | None = None
-
-
 def parse_cors_origins(raw: str | None) -> list[str]:
     if not raw:
         return ["http://localhost:3000"]
@@ -95,51 +86,33 @@ def create_app(control_plane: AgentControlPlane | None = None) -> FastAPI:
         result = plane.import_memories(imports)
         return dump_model(result)
 
+    @app.get(f"/{CONTROL_API_VERSION}/connections", dependencies=[Depends(require_api_key)])
+    def connections() -> dict[str, Any]:
+        return {"connections": [dump_model(connection) for connection in plane.list_connections()]}
+
+    @app.get(f"/{CONTROL_API_VERSION}/sessions", dependencies=[Depends(require_api_key)])
+    def sessions() -> dict[str, Any]:
+        return {"sessions": [dump_model(session) for session in plane.list_sessions()]}
+
     @app.get(f"/{CONTROL_API_VERSION}/integrations", dependencies=[Depends(require_api_key)])
     def integrations() -> dict[str, Any]:
-        return {"integrations": [dump_model(integration) for integration in plane.list_integrations()]}
+        return {"connections": [dump_model(connection) for connection in plane.list_integrations()]}
 
     @app.get(f"/{CONTROL_API_VERSION}/scheduled-tasks", dependencies=[Depends(require_api_key)])
     def scheduled_tasks() -> dict[str, Any]:
         return {"tasks": [dump_model(task) for task in plane.list_scheduled_tasks()]}
 
-    @app.patch(
-        f"/{CONTROL_API_VERSION}/scheduled-tasks/{{task_id}}",
-        dependencies=[Depends(require_api_key)],
-    )
-    def patch_scheduled_task(task_id: str, body: PatchScheduledTaskBody) -> dict[str, Any]:
-        wants_cancel = body.enabled is False or body.status == "cancelled"
-        wants_enable = body.enabled is True
-        if wants_enable:
-            raise HTTPException(
-                status_code=400,
-                detail="Re-enabling scheduled tasks from the dashboard is not supported yet.",
-            )
-        if not wants_cancel:
-            raise HTTPException(
-                status_code=400,
-                detail="Only scheduled task cancellation is supported from the dashboard.",
-            )
-        try:
-            task = plane.cancel_scheduled_task(task_id)
-        except KeyError as exc:
-            raise HTTPException(status_code=404, detail="Scheduled task not found.") from exc
-        return {"task": dump_model(task)}
+    @app.patch(f"/{CONTROL_API_VERSION}/scheduled-tasks/{{task_id}}", dependencies=[Depends(require_api_key)])
+    def patch_scheduled_task(task_id: str) -> None:
+        raise HTTPException(status_code=410, detail="Scheduled tasks are read-only in the dashboard.")
 
     @app.get(f"/{CONTROL_API_VERSION}/approvals", dependencies=[Depends(require_api_key)])
-    def approvals() -> dict[str, Any]:
-        return {"approvals": [dump_model(approval) for approval in plane.list_pending_approvals()]}
+    def approvals() -> None:
+        raise HTTPException(status_code=410, detail="Approvals are handled in the active Tomo gateway, not the dashboard.")
 
-    @app.post(
-        f"/{CONTROL_API_VERSION}/approvals/{{approval_id}}",
-        dependencies=[Depends(require_api_key)],
-    )
-    def resolve_approval(approval_id: str, body: ResolveApprovalBody) -> dict[str, Any]:
-        try:
-            resolution = plane.resolve_approval(approval_id, body.approved)
-        except KeyError as exc:
-            raise HTTPException(status_code=404, detail="Pending approval not found.") from exc
-        return dump_model(resolution)
+    @app.post(f"/{CONTROL_API_VERSION}/approvals/{{approval_id}}", dependencies=[Depends(require_api_key)])
+    def resolve_approval(approval_id: str) -> None:
+        raise HTTPException(status_code=410, detail="Approvals are handled in the active Tomo gateway, not the dashboard.")
 
     return app
 

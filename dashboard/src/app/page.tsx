@@ -1,44 +1,32 @@
-import { ApprovalQueue } from "@/components/approvals/ApprovalQueue";
+import { MemoryPreview } from "@/components/memories/MemoryPreview";
 import { TopBar } from "@/components/shell/TopBar";
 import { StatCard } from "@/components/ui/StatCard";
-import {
-  getOverviewStats,
-  getPendingApprovals,
-} from "@/lib/data";
+import { getMemories, getOverviewStats } from "@/lib/data";
 
 export default async function HomePage() {
-  const [stats, approvals] = await Promise.all([
-    getOverviewStats(),
-    getPendingApprovals(),
-  ]);
+  const [stats, memories] = await Promise.all([getOverviewStats(), getMemories()]);
 
   return (
     <>
       <TopBar />
-      <section className="grid cols-3">
+      <section className="grid cols-2">
         <StatCard
-          href="/memories"
-          label="Memories"
-          value={stats.memoryCount}
-          meta={`${stats.memoriesUpdatedThisWeek} updated this week`}
-        />
-        <StatCard
-          href="/integrations"
-          label="Integrations"
-          value={stats.integrationCount}
-          meta={`${stats.integrationsNeedingReview} require review`}
+          href="/sessions"
+          label="Sessions"
+          value={stats.sessionCount}
+          meta="saved chat sessions"
           dot="cyan"
         />
         <StatCard
           href="/scheduled-tasks"
           label="Scheduled tasks"
           value={stats.scheduledTaskCount}
-          meta={`${stats.scheduledTasksGated} gated by approval`}
+          meta="Read-only routines"
           dot="amber"
         />
       </section>
-      <section style={{ marginTop: 16 }}>
-        <ApprovalQueue initialApprovals={approvals} />
+      <section className="home-memory-section">
+        <MemoryPreview entries={memories} />
       </section>
     </>
   );

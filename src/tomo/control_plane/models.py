@@ -20,15 +20,10 @@ class ControlHealth(ControlModel):
 class ControlOverview(ControlModel):
     memory_count: int = Field(alias="memoryCount")
     memories_updated_this_week: int = Field(alias="memoriesUpdatedThisWeek")
-    tool_count: int = Field(alias="toolCount")
-    skill_count: int = Field(alias="skillCount")
-    gateway_count: int = Field(alias="gatewayCount")
-    gateways_needing_review: int = Field(alias="gatewaysNeedingReview")
-    integration_count: int = Field(alias="integrationCount")
-    integrations_needing_review: int = Field(alias="integrationsNeedingReview")
+    session_count: int = Field(alias="sessionCount")
+    connection_count: int = Field(alias="connectionCount")
+    connections_needing_review: int = Field(alias="connectionsNeedingReview")
     scheduled_task_count: int = Field(alias="scheduledTaskCount")
-    scheduled_tasks_gated: int = Field(alias="scheduledTasksGated")
-    pending_approval_count: int = Field(alias="pendingApprovalCount")
 
 
 class ControlMemoryEntry(ControlModel):
@@ -80,11 +75,20 @@ class ControlScheduledTask(ControlModel):
     requires_approval: bool = Field(alias="requiresApproval")
 
 
-class ControlIntegration(ControlModel):
+class ControlConnection(ControlModel):
     id: str
     name: str
-    kind: Literal["tool", "skill", "gateway"]
+    category: Literal["chat", "app", "social", "custom"]
     description: str
-    scopes: list[str]
+    status: Literal["connected", "available", "needs_setup", "disabled", "unknown"]
     enabled: bool
     review_required: bool = Field(default=False, alias="reviewRequired")
+    metadata: dict[str, str | int | bool | None] = Field(default_factory=dict)
+
+
+class ControlSession(ControlModel):
+    id: str
+    name: str
+    created_date: str = Field(alias="createdDate")
+    updated_date: str = Field(alias="updatedDate")
+    message_count: int = Field(alias="messageCount")

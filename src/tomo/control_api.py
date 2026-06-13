@@ -3,8 +3,6 @@ from __future__ import annotations
 from .control_plane.http_adapter import (
     CONTROL_API_VERSION,
     AppendMemoryBody,
-    PatchScheduledTaskBody,
-    ResolveApprovalBody,
     app,
     create_app,
 )
@@ -28,8 +26,6 @@ __all__ = [
     "CONTROL_API_PID_FILENAME",
     "CONTROL_API_VERSION",
     "AppendMemoryBody",
-    "PatchScheduledTaskBody",
-    "ResolveApprovalBody",
     "app",
     "create_app",
     "log_path",

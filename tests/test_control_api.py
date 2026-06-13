@@ -9,10 +9,8 @@ from fastapi.testclient import TestClient
 
 from tomo.config import settings
 from tomo.control_api import create_app
-from tomo.control_approval_store import ControlApprovalStore
-from tomo.control_store import append_memory_entry, parse_memory_entries
 from tomo.scheduler import SCHEDULED_TASKS_FILE, ScheduledTask
-from tomo.tools import ApprovalRequest
+from tomo.session_store import create_session, save_session
 
 
 @pytest.fixture
@@ -48,7 +46,7 @@ def test_memories_list_and_append(client, tmp_path):
     created = client.post("/v1/memories", json={"text": "Use a dedicated tomo browser first."})
     assert created.status_code == 200
     assert created.json()["entry"]["freshness"] == "new"
-    assert len(parse_memory_entries(memory_file)) == 2
+    assert len(client.get("/v1/memories").json()["entries"]) == 2
 
 
 def test_overview_counts_memories(client, tmp_path):
@@ -67,20 +65,33 @@ def test_overview_counts_memories(client, tmp_path):
     assert payload["memoriesUpdatedThisWeek"] == 1
 
 
-def test_integrations_include_tools_and_gateways(client):
-    response = client.get("/v1/integrations")
+def test_connections_include_user_facing_surfaces(client):
+    response = client.get("/v1/connections")
     assert response.status_code == 200
-    integrations = response.json()["integrations"]
-    kinds = {item["kind"] for item in integrations}
-    names = {item["name"] for item in integrations}
-    assert "tool" in kinds
-    assert "gateway" in kinds
-    assert "browser" in names
+    connections = response.json()["connections"]
+    categories = {item["category"] for item in connections}
+    names = {item["name"] for item in connections}
+    assert "chat" in categories
+    assert "social" in categories
+    assert "browser" not in names
     assert "desktop" in names
     assert "telegram" in names
+    assert client.get("/v1/integrations").json() == response.json()
 
 
-def test_scheduled_tasks_and_cancel(client, tmp_path, monkeypatch):
+def test_sessions_list_saved_sessions(client):
+    session = create_session("Project A")
+    session.messages.append({"role": "user", "content": "hello"})
+    save_session(session)
+
+    response = client.get("/v1/sessions")
+
+    assert response.status_code == 200
+    assert response.json()["sessions"][0]["name"] == "Project A"
+    assert response.json()["sessions"][0]["messageCount"] == 1
+
+
+def test_scheduled_tasks_are_read_only(client, tmp_path, monkeypatch):
     import tomo.scheduler as scheduler_module
 
     monkeypatch.setattr(scheduler_module, "_scheduler", None)
@@ -100,29 +111,17 @@ def test_scheduled_tasks_and_cancel(client, tmp_path, monkeypatch):
     assert listed.json()["tasks"][0]["label"] == "Reminder"
 
     patched = client.patch("/v1/scheduled-tasks/task-123", json={"enabled": False})
-    assert patched.status_code == 200
-    assert patched.json()["task"]["status"] == "cancelled"
+    assert patched.status_code == 410
+    assert patched.json()["detail"] == "Scheduled tasks are read-only in the dashboard."
 
 
-def test_approvals_list_and_resolve(client, tmp_path, monkeypatch):
-    store_path = tmp_path / ".tomo" / "control_approvals.json"
-    import tomo.control_approval_store as approval_store_module
-
-    store = ControlApprovalStore(storage_path=store_path)
-    monkeypatch.setattr(approval_store_module, "_store", store)
-    approval_id = store.create(
-        "desktop:local",
-        ApprovalRequest(operation="terminal", target="uv run pytest", reason="Run tests"),
-    )
-
+def test_approvals_are_runtime_only(client):
     listed = client.get("/v1/approvals")
-    assert listed.status_code == 200
-    assert listed.json()["approvals"][0]["id"] == approval_id
+    assert listed.status_code == 410
 
-    resolved = client.post(f"/v1/approvals/{approval_id}", json={"approved": True})
-    assert resolved.status_code == 200
-    assert store.get_resolution(approval_id) is True
-    assert store.list_pending() == []
+    resolved = client.post("/v1/approvals/approval-123", json={"approved": True})
+    assert resolved.status_code == 410
+    assert resolved.json()["detail"] == "Approvals are handled in the active Tomo gateway, not the dashboard."
 
 
 def test_api_key_required_when_configured(client, monkeypatch):
@@ -142,4 +141,4 @@ def test_import_memories_from_text_file(client, tmp_path):
     assert response.status_code == 200
     payload = response.json()
     assert payload["imported"] == 2
-    assert len(parse_memory_entries(tmp_path / "MEMORY.md")) == 2
+    assert len(client.get("/v1/memories").json()["entries"]) == 2

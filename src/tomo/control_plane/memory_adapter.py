@@ -5,7 +5,7 @@ import re
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from tomo.tools import MEMORY_FILE, now_iso
+from tomo.memory_store import MemoryRecord, MemoryRepository, SQLiteMemoryRepository
 
 from .models import ControlMemoryEntry, MemoryImportFile
 
@@ -45,38 +45,30 @@ def title_from_text(text: str) -> str:
     return " ".join(text.strip().split()[:6]).lower()
 
 
-def memory_entry(timestamp_raw: str, text: str) -> ControlMemoryEntry | None:
-    timestamp = parse_timestamp(timestamp_raw)
+def memory_entry(record: MemoryRecord) -> ControlMemoryEntry | None:
+    timestamp = parse_timestamp(record.created_at)
     if timestamp is None:
         return None
     return ControlMemoryEntry(
-        id=memory_id(timestamp_raw, text),
+        id=record.id or memory_id(record.created_at, record.text),
         timestamp=timestamp.isoformat().replace("+00:00", "Z"),
-        text=text,
-        title=title_from_text(text),
-        status="active",
+        text=record.text,
+        title=title_from_text(record.text),
+        status="disabled" if record.disabled_at else "active",
         freshness=freshness(timestamp),
         updated_label=updated_label(timestamp),
     )
 
 
 class MemoryAdapter:
-    def __init__(self, path: Path | None = None) -> None:
-        self.path = path or MEMORY_FILE
+    def __init__(self, path: Path | None = None, repository: MemoryRepository | None = None) -> None:
+        self.path = path or Path("MEMORY.md")
+        self.repository = repository or SQLiteMemoryRepository(migration_source=self.path)
 
     def list(self) -> list[ControlMemoryEntry]:
-        if not self.path.exists():
-            return []
         entries: list[ControlMemoryEntry] = []
-        for line in self.path.read_text(encoding="utf-8").splitlines():
-            stripped = line.strip()
-            if not stripped:
-                continue
-            match = MEMORY_LINE_RE.match(stripped)
-            if not match:
-                continue
-            timestamp_raw, text = match.groups()
-            entry = memory_entry(timestamp_raw, text)
+        for record in self.repository.list():
+            entry = memory_entry(record)
             if entry is not None:
                 entries.append(entry)
         return sorted(entries, key=lambda item: item.timestamp, reverse=True)
@@ -85,11 +77,7 @@ class MemoryAdapter:
         cleaned = text.strip()
         if not cleaned:
             raise ValueError("memory text cannot be empty")
-        timestamp = now_iso()
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        with open(self.path, "a", encoding="utf-8") as handle:
-            handle.write(f"[{timestamp}] {cleaned}\n")
-        entry = memory_entry(timestamp, cleaned)
+        entry = memory_entry(self.repository.append(cleaned, source="manual"))
         if entry is None:
             raise ValueError("memory timestamp could not be parsed")
         return entry
@@ -102,5 +90,7 @@ class MemoryAdapter:
             for paragraph in re.split(r"\n\s*\n", file.text.strip()):
                 cleaned = " ".join(paragraph.split())
                 if cleaned:
-                    imported.append(self.append(cleaned))
+                    entry = memory_entry(self.repository.append(cleaned, source="import", source_ref=file.filename))
+                    if entry is not None:
+                        imported.append(entry)
         return imported

@@ -1,8 +1,8 @@
 export type OverviewStats = {
   memoryCount: number;
   memoriesUpdatedThisWeek: number;
-  integrationCount: number;
-  integrationsNeedingReview: number;
+  sessionCount: number;
+  connectionCount: number;
+  connectionsNeedingReview: number;
   scheduledTaskCount: number;
-  scheduledTasksGated: number;
 };

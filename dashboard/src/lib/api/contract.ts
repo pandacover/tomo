@@ -4,11 +4,11 @@
  * Dashboard calls CONTROL_API_URL; agent stays on a separate host.
  */
 
-import type { PendingApproval } from "@/domain/approval";
-import type { Integration } from "@/domain/integration";
+import type { Connection } from "@/domain/connection";
 import type { MemoryEntry } from "@/domain/memory";
 import type { OverviewStats } from "@/domain/overview";
 import type { ScheduledTask } from "@/domain/scheduled-task";
+import type { SessionSummary } from "@/domain/session";
 
 export const CONTROL_API_VERSION = "v1" as const;
 
@@ -19,9 +19,7 @@ export type HealthResponse = {
   authenticated: boolean;
 };
 
-export type OverviewResponse = OverviewStats & {
-  pendingApprovalCount: number;
-};
+export type OverviewResponse = OverviewStats;
 
 export type MemoriesResponse = {
   entries: MemoryEntry[];
@@ -36,25 +34,16 @@ export type ImportMemoryResponse = {
   entries: MemoryEntry[];
 };
 
-export type IntegrationsResponse = {
-  integrations: Integration[];
+export type ConnectionsResponse = {
+  connections: Connection[];
 };
 
 export type ScheduledTasksResponse = {
   tasks: ScheduledTask[];
 };
 
-export type PatchScheduledTaskRequest = {
-  enabled?: boolean;
-  status?: ScheduledTask["status"];
-};
-
-export type ApprovalsResponse = {
-  approvals: PendingApproval[];
-};
-
-export type ResolveApprovalRequest = {
-  approved: boolean;
+export type SessionsResponse = {
+  sessions: SessionSummary[];
 };
 
 export const controlApiRoutes = {
@@ -62,8 +51,8 @@ export const controlApiRoutes = {
   overview: `/${CONTROL_API_VERSION}/overview`,
   memories: `/${CONTROL_API_VERSION}/memories`,
   memoriesImport: `/${CONTROL_API_VERSION}/memories/import`,
+  connections: `/${CONTROL_API_VERSION}/connections`,
+  sessions: `/${CONTROL_API_VERSION}/sessions`,
   integrations: `/${CONTROL_API_VERSION}/integrations`,
   scheduledTasks: `/${CONTROL_API_VERSION}/scheduled-tasks`,
-  approval: (id: string) => `/${CONTROL_API_VERSION}/approvals/${id}`,
-  approvals: `/${CONTROL_API_VERSION}/approvals`,
 } as const;

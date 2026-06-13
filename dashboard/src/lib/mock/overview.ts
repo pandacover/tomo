@@ -1,17 +1,13 @@
 import type { OverviewStats } from "@/domain/overview";
-import { mockApprovals } from "@/lib/mock/approvals";
-import { mockIntegrations } from "@/lib/mock/integrations";
+import { mockConnections } from "@/lib/mock/connections";
 import { mockScheduledTasks } from "@/lib/mock/scheduled-tasks";
+import { mockSessions } from "@/lib/mock/sessions";
 
 export const mockOverviewStats: OverviewStats = {
   memoryCount: 128,
   memoriesUpdatedThisWeek: 14,
-  integrationCount: mockIntegrations.length + 14,
-  integrationsNeedingReview: mockIntegrations.filter((i) => i.reviewRequired).length,
+  sessionCount: mockSessions.length,
+  connectionCount: mockConnections.length,
+  connectionsNeedingReview: mockConnections.filter((connection) => connection.reviewRequired).length,
   scheduledTaskCount: mockScheduledTasks.length + 28,
-  scheduledTasksGated: mockScheduledTasks.filter((t) => t.requiresApproval).length + 5,
 };
-
-export function getMockApprovalCount() {
-  return mockApprovals.length;
-}

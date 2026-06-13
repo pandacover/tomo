@@ -6,21 +6,20 @@ from pathlib import Path
 from tomo.config import settings
 from tomo.token_store import load_tokens
 
-from .approval_adapter import ApprovalAdapter
-from .integration_adapter import IntegrationAdapter
+from .connection_adapter import ConnectionAdapter
 from .memory_adapter import MemoryAdapter, parse_timestamp
 from .models import (
-    ControlApproval,
-    ControlApprovalResolution,
+    ControlConnection,
     ControlHealth,
-    ControlIntegration,
     ControlMemoryEntry,
     ControlOverview,
     ControlScheduledTask,
+    ControlSession,
     MemoryImportFile,
     MemoryImportResult,
 )
 from .scheduler_adapter import SchedulerAdapter
+from .session_adapter import SessionAdapter
 
 
 class AgentControlPlane:
@@ -28,14 +27,14 @@ class AgentControlPlane:
         self,
         *,
         memory: MemoryAdapter | None = None,
-        approvals: ApprovalAdapter | None = None,
-        integrations: IntegrationAdapter | None = None,
+        connections: ConnectionAdapter | None = None,
         scheduler: SchedulerAdapter | None = None,
+        sessions: SessionAdapter | None = None,
     ) -> None:
         self.memory = memory or MemoryAdapter()
-        self.approvals = approvals or ApprovalAdapter()
-        self.integrations = integrations or IntegrationAdapter()
+        self.connections = connections or ConnectionAdapter()
         self.scheduler = scheduler or SchedulerAdapter()
+        self.sessions = sessions or SessionAdapter()
 
     def health(self) -> ControlHealth:
         return ControlHealth(
@@ -55,26 +54,16 @@ class AgentControlPlane:
             if timestamp and timestamp >= week_ago:
                 updated_this_week += 1
 
-        integrations = self.list_integrations()
+        connections = self.list_connections()
         tasks = self.list_scheduled_tasks()
-        pending_tasks = [task for task in tasks if task.status == "pending"]
-        pending_approvals = self.list_pending_approvals()
-        tools = [item for item in integrations if item.kind == "tool"]
-        skills = [item for item in integrations if item.kind == "skill"]
-        gateways = [item for item in integrations if item.kind == "gateway"]
-        integrations_needing_review = sum(1 for item in integrations if item.review_required)
+        sessions = self.list_sessions()
         return ControlOverview(
             memory_count=len(memories),
             memories_updated_this_week=updated_this_week,
-            tool_count=len(tools),
-            skill_count=len(skills),
-            gateway_count=len(gateways),
-            gateways_needing_review=sum(1 for item in gateways if item.review_required),
-            integration_count=len(integrations),
-            integrations_needing_review=integrations_needing_review,
+            session_count=len(sessions),
+            connection_count=len(connections),
+            connections_needing_review=sum(1 for item in connections if item.review_required),
             scheduled_task_count=len(tasks),
-            scheduled_tasks_gated=sum(1 for task in pending_tasks if task.kind == "action"),
-            pending_approval_count=len(pending_approvals),
         )
 
     def list_memories(self) -> list[ControlMemoryEntry]:
@@ -87,17 +76,14 @@ class AgentControlPlane:
         entries = self.memory.import_files(files)
         return MemoryImportResult(imported=len(entries), entries=entries)
 
-    def list_integrations(self) -> list[ControlIntegration]:
-        return self.integrations.list()
+    def list_connections(self) -> list[ControlConnection]:
+        return self.connections.list()
+
+    def list_integrations(self) -> list[ControlConnection]:
+        return self.list_connections()
 
     def list_scheduled_tasks(self) -> list[ControlScheduledTask]:
         return self.scheduler.list()
 
-    def cancel_scheduled_task(self, task_id: str) -> ControlScheduledTask:
-        return self.scheduler.cancel(task_id)
-
-    def list_pending_approvals(self) -> list[ControlApproval]:
-        return self.approvals.list_pending()
-
-    def resolve_approval(self, approval_id: str, approved: bool) -> ControlApprovalResolution:
-        return self.approvals.resolve(approval_id, approved)
+    def list_sessions(self) -> list[ControlSession]:
+        return self.sessions.list()

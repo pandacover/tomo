@@ -234,15 +234,70 @@ select {
   border-top: 1px solid var(--line);
 }
 
-.drawer-list a {
+.drawer-list a,
+.drawer-list button {
   display: flex;
+  width: 100%;
   min-height: 54px;
   align-items: center;
   justify-content: space-between;
   border-bottom: 1px solid var(--line);
+  border-top: 0;
+  border-right: 0;
+  border-left: 0;
   color: var(--ink);
+  background: transparent;
+  cursor: pointer;
+  padding: 0;
+  text-align: left;
 }
 
+.drawer-panel {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.drawer-panel-head {
+  margin: 20px 0 22px;
+}
+
+.drawer-panel-head h2 {
+  margin-bottom: 8px;
+}
+
+.drawer-back {
+  align-self: flex-start;
+  min-height: 34px;
+  padding: 0;
+  border: 0;
+  color: var(--muted);
+  background: transparent;
+  cursor: pointer;
+}
+
+.drawer-back::before {
+  content: "<";
+  margin-right: 8px;
+}
+
+.drawer-connections {
+  min-height: 0;
+  overflow: auto;
+  padding-bottom: 4px;
+}
+
+.drawer-connections .tabs {
+  margin-bottom: 8px;
+}
+
+.drawer-connections .record {
+  padding: 12px 0;
+}
+
+.drawer-connections .record p {
+  margin-bottom: 0;
+}
 
 .eyebrow,
 .meta,
@@ -390,6 +445,28 @@ h3 {
   background: var(--glass);
   box-shadow: var(--shadow);
   backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate)) brightness(var(--glass-brightness));
+}
+
+.home-memory-section {
+  margin-top: 18px;
+}
+
+.memory-tile {
+  min-height: 280px;
+  padding: 18px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--glass);
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate)) brightness(var(--glass-brightness));
+}
+
+.memory-tile h2 {
+  margin: 4px 0 0;
+}
+
+.memory-tile .record {
+  padding: 12px 0;
 }
 
 .panel {
@@ -571,6 +648,20 @@ h3 {
   gap: 10px;
 }
 
+.stack {
+  display: grid;
+  gap: 18px;
+}
+
+.section-heading {
+  margin: 0 0 10px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
 .table {
   width: 100%;
   border-collapse: collapse;
@@ -678,18 +769,33 @@ textarea.field {
 }
 
 .tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
   flex: 0 0 auto;
   padding: 9px 11px;
   border: 1px solid var(--line);
   border-radius: var(--radius);
   color: var(--muted);
   background: var(--tab-idle-bg);
+  cursor: pointer;
 }
 
 .tab.active {
   color: var(--ink);
   border-color: rgba(var(--accent-rgb), 0.38);
   background: rgba(var(--accent-rgb), 0.1);
+}
+
+.tab-count {
+  display: inline-grid;
+  min-width: 20px;
+  height: 20px;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--badge-text);
+  font-size: 11px;
 }
 
 .split-form {

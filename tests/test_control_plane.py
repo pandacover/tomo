@@ -6,24 +6,18 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from tomo.config import settings
-from tomo.control_approval_store import ControlApprovalStore
-from tomo.control_plane.approval_adapter import ApprovalAdapter
 from tomo.control_plane.memory_adapter import MemoryAdapter
 from tomo.control_plane.models import MemoryImportFile
 from tomo.control_plane.plane import AgentControlPlane
 from tomo.scheduler import SCHEDULED_TASKS_FILE, ScheduledTask
-from tomo.tools import ApprovalRequest
+from tomo.session_store import create_session, save_session
 
 
 @pytest.fixture
 def plane(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(settings, "data_dir", tmp_path / ".tomo")
-    store = ControlApprovalStore(storage_path=tmp_path / ".tomo" / "control_approvals.json")
-    return AgentControlPlane(
-        memory=MemoryAdapter(tmp_path / "MEMORY.md"),
-        approvals=ApprovalAdapter(store),
-    )
+    return AgentControlPlane(memory=MemoryAdapter(tmp_path / "MEMORY.md"))
 
 
 def test_health_returns_runtime_state(plane, tmp_path):
@@ -62,20 +56,24 @@ def test_import_memories_rejects_unsupported_file_type(plane):
         plane.import_memories([MemoryImportFile(filename="notes.pdf", text="not parsed")])
 
 
-def test_integrations_include_tools_skills_and_gateways(plane):
-    integrations = plane.list_integrations()
-    kinds = {item.kind for item in integrations}
-    names = {item.name for item in integrations}
+def test_connections_include_user_facing_surfaces_not_internal_tools_or_skills(plane, tmp_path):
+    tools_dir = tmp_path / "mcps" / "react-grab-mcp" / "tools"
+    tools_dir.mkdir(parents=True)
+    (tools_dir / "get_element_context.json").write_text("{}", encoding="utf-8")
 
-    assert "tool" in kinds
-    assert "skill" in kinds
-    assert "gateway" in kinds
-    assert "browser" in names
+    connections = plane.list_connections()
+    categories = {item.category for item in connections}
+    names = {item.name for item in connections}
+
+    assert {"chat", "social", "custom"}.issubset(categories)
+    assert "browser" not in names
+    assert "skill-installer" not in names
     assert "desktop" in names
     assert "telegram" in names
+    assert next(item for item in connections if item.name == "react-grab-mcp").metadata == {"toolCount": 1}
 
 
-def test_scheduled_tasks_list_and_cancel(plane, tmp_path, monkeypatch):
+def test_scheduled_tasks_list_is_read_only(plane, tmp_path, monkeypatch):
     import tomo.scheduler as scheduler_module
 
     monkeypatch.setattr(scheduler_module, "_scheduler", None)
@@ -93,36 +91,25 @@ def test_scheduled_tasks_list_and_cancel(plane, tmp_path, monkeypatch):
     listed = plane.list_scheduled_tasks()
     assert listed[0].label == "Reminder"
 
-    cancelled = plane.cancel_scheduled_task("task-123")
-    assert cancelled.status == "cancelled"
 
+def test_sessions_list_saved_sessions(plane):
+    session = create_session("Project A")
+    session.messages.append({"role": "user", "content": "hello"})
+    save_session(session)
 
-def test_approvals_list_and_resolve(plane):
-    approval_id = plane.approvals.store.create(
-        "desktop:local",
-        ApprovalRequest(operation="terminal", target="uv run pytest", reason="Run tests"),
-    )
+    listed = plane.list_sessions()
 
-    pending = plane.list_pending_approvals()
-    assert pending[0].id == approval_id
-
-    resolution = plane.resolve_approval(approval_id, True)
-    assert resolution.ok is True
-    assert resolution.approved is True
-    assert plane.list_pending_approvals() == []
+    assert listed[0].name == "Project A"
+    assert listed[0].message_count == 1
 
 
 def test_overview_counts_control_data(plane, tmp_path):
     recent = datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
     (tmp_path / "MEMORY.md").write_text(f"[{recent}] recent memory\n", encoding="utf-8")
-    plane.approvals.store.create(
-        "desktop:local",
-        ApprovalRequest(operation="terminal", target="uv run pytest", reason="Run tests"),
-    )
 
     overview = plane.overview()
 
     assert overview.memory_count == 1
     assert overview.memories_updated_this_week == 1
-    assert overview.pending_approval_count == 1
-    assert overview.integration_count == overview.tool_count + overview.skill_count + overview.gateway_count
+    assert overview.session_count == len(plane.list_sessions())
+    assert overview.connection_count == len(plane.list_connections())

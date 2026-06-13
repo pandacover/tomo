@@ -1,11 +1,7 @@
 import { controlApiAuthHeaders, resolveControlApiUrl } from "@/lib/api/config";
 import { controlApiRoutes } from "@/lib/api/contract";
-import {
-  importMemoryResponseSchema,
-  scheduledTaskResponseSchema,
-} from "@/lib/api/schemas";
+import { importMemoryResponseSchema } from "@/lib/api/schemas";
 import type { MemoryEntry } from "@/domain/memory";
-import type { ScheduledTask } from "@/domain/scheduled-task";
 
 class ControlApiError extends Error {
   constructor(
@@ -57,16 +53,6 @@ async function controlRequest<T>(
   return response.json() as Promise<T>;
 }
 
-export async function resolveApprovalAction(
-  approvalId: string,
-  approved: boolean,
-): Promise<void> {
-  await controlRequest(controlApiRoutes.approval(approvalId), {
-    method: "POST",
-    body: JSON.stringify({ approved }),
-  });
-}
-
 export async function importMemoriesAction(
   files: File[],
 ): Promise<{ imported: number; entries: MemoryEntry[] }> {
@@ -79,18 +65,4 @@ export async function importMemoriesAction(
     body: form,
   });
   return importMemoryResponseSchema.parse(payload);
-}
-
-export async function patchScheduledTaskAction(
-  taskId: string,
-  body: { enabled?: boolean; status?: ScheduledTask["status"] },
-): Promise<ScheduledTask> {
-  const payload = await controlRequest<unknown>(
-    `${controlApiRoutes.scheduledTasks}/${taskId}`,
-    {
-      method: "PATCH",
-      body: JSON.stringify(body),
-    },
-  );
-  return scheduledTaskResponseSchema.parse(payload).task;
 }

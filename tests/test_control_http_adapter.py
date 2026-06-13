@@ -6,13 +6,10 @@ import pytest
 from fastapi.testclient import TestClient
 
 from tomo.config import settings
-from tomo.control_approval_store import ControlApprovalStore
-from tomo.control_plane.approval_adapter import ApprovalAdapter
 from tomo.control_plane.http_adapter import create_app
 from tomo.control_plane.memory_adapter import MemoryAdapter
 from tomo.control_plane.plane import AgentControlPlane
 from tomo.scheduler import SCHEDULED_TASKS_FILE, ScheduledTask
-from tomo.tools import ApprovalRequest
 
 
 @pytest.fixture
@@ -20,10 +17,7 @@ def client(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(settings, "data_dir", tmp_path / ".tomo")
     monkeypatch.setattr(settings, "control_api_key", None)
-    plane = AgentControlPlane(
-        memory=MemoryAdapter(tmp_path / "MEMORY.md"),
-        approvals=ApprovalAdapter(ControlApprovalStore(storage_path=tmp_path / ".tomo" / "control_approvals.json")),
-    )
+    plane = AgentControlPlane(memory=MemoryAdapter(tmp_path / "MEMORY.md"))
     return TestClient(create_app(plane))
 
 
@@ -31,9 +25,11 @@ def test_http_routes_preserve_v1_contract(client):
     assert client.get("/v1/health").status_code == 200
     assert client.get("/v1/overview").status_code == 200
     assert client.get("/v1/memories").json() == {"entries": []}
-    assert "integrations" in client.get("/v1/integrations").json()
+    assert "connections" in client.get("/v1/connections").json()
+    assert client.get("/v1/sessions").json() == {"sessions": []}
+    assert client.get("/v1/integrations").json() == client.get("/v1/connections").json()
     assert client.get("/v1/scheduled-tasks").json() == {"tasks": []}
-    assert client.get("/v1/approvals").json() == {"approvals": []}
+    assert client.get("/v1/approvals").status_code == 410
 
 
 def test_http_import_memories(client, tmp_path):
@@ -43,7 +39,7 @@ def test_http_import_memories(client, tmp_path):
 
     assert response.status_code == 200
     assert response.json()["imported"] == 2
-    assert (tmp_path / "MEMORY.md").read_text(encoding="utf-8").count("\n") == 2
+    assert len(client.get("/v1/memories").json()["entries"]) == 2
 
 
 def test_http_import_memories_rejects_pdf(client):
@@ -55,7 +51,7 @@ def test_http_import_memories_rejects_pdf(client):
     assert response.json()["detail"] == "Unsupported file type: .pdf"
 
 
-def test_http_scheduled_task_cancel_and_reenable_error(client, tmp_path, monkeypatch):
+def test_http_scheduled_task_patch_is_gone(client, tmp_path, monkeypatch):
     import tomo.scheduler as scheduler_module
 
     monkeypatch.setattr(scheduler_module, "_scheduler", None)
@@ -71,26 +67,15 @@ def test_http_scheduled_task_cancel_and_reenable_error(client, tmp_path, monkeyp
     tasks_path.write_text(json.dumps([task.__dict__]), encoding="utf-8")
 
     reenable = client.patch("/v1/scheduled-tasks/task-123", json={"enabled": True})
-    assert reenable.status_code == 400
-    assert "Re-enabling" in reenable.json()["detail"]
-
-    cancelled = client.patch("/v1/scheduled-tasks/task-123", json={"enabled": False})
-    assert cancelled.status_code == 200
-    assert cancelled.json()["task"]["status"] == "cancelled"
+    assert reenable.status_code == 410
+    assert reenable.json()["detail"] == "Scheduled tasks are read-only in the dashboard."
 
 
 def test_http_approval_resolve_errors_for_missing_id(client):
     response = client.post("/v1/approvals/missing", json={"approved": True})
 
-    assert response.status_code == 404
-    assert response.json()["detail"] == "Pending approval not found."
-
-
-def test_http_approval_resolve(client):
-    store = client.app.extra  # unused, keeps this test close to route contract
-    del store
-    # Use the public route to verify the empty path first, then seed through the app closure by rebuilding.
-    assert client.get("/v1/approvals").json() == {"approvals": []}
+    assert response.status_code == 410
+    assert response.json()["detail"] == "Approvals are handled in the active Tomo gateway, not the dashboard."
 
 
 def test_api_key_required_when_configured(tmp_path, monkeypatch):

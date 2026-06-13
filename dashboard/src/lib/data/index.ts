@@ -1,22 +1,22 @@
 import { unstable_noStore as noStore } from "next/cache";
-import type { PendingApproval } from "@/domain/approval";
-import type { Integration } from "@/domain/integration";
+import type { Connection } from "@/domain/connection";
 import type { MemoryEntry } from "@/domain/memory";
 import type { OverviewStats } from "@/domain/overview";
 import type { ScheduledTask } from "@/domain/scheduled-task";
+import type { SessionSummary } from "@/domain/session";
 import {
   controlApiConfigured,
-  fetchApprovalsFromApi,
-  fetchIntegrationsFromApi,
+  fetchConnectionsFromApi,
   fetchMemoriesFromApi,
   fetchOverviewFromApi,
   fetchScheduledTasksFromApi,
+  fetchSessionsFromApi,
 } from "@/lib/api/client";
-import { mockApprovals } from "@/lib/mock/approvals";
-import { mockIntegrations } from "@/lib/mock/integrations";
+import { mockConnections } from "@/lib/mock/connections";
 import { mockMemories } from "@/lib/mock/memories";
 import { mockOverviewStats } from "@/lib/mock/overview";
 import { mockScheduledTasks } from "@/lib/mock/scheduled-tasks";
+import { mockSessions } from "@/lib/mock/sessions";
 
 const useMocks = !controlApiConfigured();
 
@@ -36,9 +36,9 @@ export async function getMemories(): Promise<MemoryEntry[]> {
   return fetchMemoriesFromApi();
 }
 
-export async function getIntegrations(): Promise<Integration[]> {
-  if (!useLiveApi()) return mockIntegrations;
-  return fetchIntegrationsFromApi();
+export async function getConnections(): Promise<Connection[]> {
+  if (!useLiveApi()) return mockConnections;
+  return fetchConnectionsFromApi();
 }
 
 export async function getScheduledTasks(): Promise<ScheduledTask[]> {
@@ -46,7 +46,7 @@ export async function getScheduledTasks(): Promise<ScheduledTask[]> {
   return fetchScheduledTasksFromApi();
 }
 
-export async function getPendingApprovals(): Promise<PendingApproval[]> {
-  if (!useLiveApi()) return mockApprovals;
-  return fetchApprovalsFromApi();
+export async function getSessions(): Promise<SessionSummary[]> {
+  if (!useLiveApi()) return mockSessions;
+  return fetchSessionsFromApi();
 }
